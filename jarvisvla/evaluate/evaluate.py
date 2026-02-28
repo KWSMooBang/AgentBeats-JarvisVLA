@@ -45,10 +45,11 @@ def evaluate(video_path,checkpoints,environment_config:dict,model_config:dict,de
         SpeedTestCallback(50), 
         TaskCallback(getattr(cfg,"task_conf",None)),
         RewardsCallback(getattr(cfg,"reward_conf",None)),
-        InitInventoryCallback(cfg.init_inventory,
-                                inventory_distraction_level=cfg.inventory_distraction_level,
-                                equip_distraction_level="normal"
-                                ),
+        # InitInventoryCallback(cfg.init_inventory,
+        #                         inventory_distraction_level=cfg.inventory_distraction_level,
+        #                         equip_distraction_level="normal"
+        #                         ),
+        InitInventoryCallback(cfg.init_inventory, distraction_level=cfg.inventory_distraction_level),
         CommandsCallback(getattr(cfg,"command",[]),),
         record_callback,
     ]
@@ -114,9 +115,14 @@ def evaluate(video_path,checkpoints,environment_config:dict,model_config:dict,de
     # get instruction
     instructions = [item["text"] for item in cfg.task_conf]
 
-    success = (False,environment_config["max_frames"])
+    success = (False, environment_config["max_frames"])
     for i in range(environment_config["max_frames"]):
-        action = agent.forward([info["pov"]],instructions,verbos=environment_config["verbos"],need_crafting_table = need_crafting_table)
+        action = agent.forward(
+            [obs['image']], 
+            instructions,
+            verbos=environment_config["verbos"],
+            need_crafting_table=need_crafting_table
+        )
         if environment_config["verbos"]:
             console.Console().log(action)
         obs, reward, terminated, truncated, info = env.step(action)
@@ -128,7 +134,11 @@ def evaluate(video_path,checkpoints,environment_config:dict,model_config:dict,de
     # sample another 30 steps if success
     if success[0]:
         for i in range(20):
-            action = agent.forward([info["pov"]],instructions,verbos=environment_config["verbos"],need_crafting_table = need_crafting_table)
+            action = agent.forward(
+                [obs['image']],
+                instructions,
+                verbos=environment_config["verbos"],
+                need_crafting_table=need_crafting_table)
             obs, reward, terminated, truncated, info = env.step(action)
          
     env.close()

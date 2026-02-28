@@ -3,7 +3,7 @@ import os
 import json
 from copy import deepcopy
 from typing import Sequence, List, Mapping, Dict, Callable, Any, Tuple, Optional
-from minestudio.models.shell.craft_agent import CraftWorker
+from env_helper.craft_agent import CraftWorker
 import time
 import random
 

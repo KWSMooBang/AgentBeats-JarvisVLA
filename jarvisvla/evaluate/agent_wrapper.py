@@ -205,11 +205,11 @@ class VLLM_AGENT:
         thought += '. \n'
         return thought
         
-    def forward(self,observations,instructions,verbos=False,need_crafting_table=False):
+    def forward(self, observations, instructions, verbos=False, need_crafting_table=False):
         if self.actions:
             if verbos:
                 print(self.actions)
-            if len(self.actions)>1:
+            if len(self.actions) > 1:
                 return self.actions.pop(0)
             else:
                 action = self.actions[0]
@@ -219,14 +219,14 @@ class VLLM_AGENT:
         image = self.processor_wrapper.create_image_input(observations[0]) 
         method = self.method_map[need_crafting_table]
         prompts = []
-        private_instruction = self.create_instruction(instructions[0],method=method)
+        private_instruction = self.create_instruction(instructions[0], method=method)
         #print(private_instruction)
-        thought= self.create_thought(instructions[0]) if self.instruction_type =="recipe" else ""
+        thought= self.create_thought(instructions[0]) if self.instruction_type == "recipe" else ""
 
         if self.history_num:
             if not self.history: #如果历史为空
-                self.history = [(image,self.action_tokenizer.null_token(),copy.copy(thought),0)]*self.history_num
-            new_history = [None]*self.history_num
+                self.history = [(image,self.action_tokenizer.null_token(),copy.copy(thought),0)] * self.history_num
+            new_history = [None] * self.history_num
             new_history[:-1] = self.history[1:]
             for hdx,(im, ac, past_thought,_) in enumerate(self.history):
                 prompt_input = ""

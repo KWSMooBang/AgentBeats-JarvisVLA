@@ -11,7 +11,7 @@ from typing import (
     Callable, Any, Tuple, Optional, Union
 )
 from minestudio.simulator.entry import MinecraftSim
-from minestudio.models.shell.gui_agent import GUIWorker
+from env_helper.gui_agent import GUIWorker
 
 def random_dic(dicts):
     dict_key_ls = list(dicts.keys())
