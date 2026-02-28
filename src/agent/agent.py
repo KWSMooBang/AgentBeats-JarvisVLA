@@ -9,7 +9,6 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class AgentState:
     """Agent state for session management."""
@@ -30,7 +29,7 @@ class JarvisVLAAgent:
     def __init__(
         self,
         base_url: str,
-        model_name: str = "CraftJarvis/JarvisVLA-Qwen2-VL-7B",
+        model_name: str = "/workspace/models/JarvisVLA-Qwen2-VL-7B",
         api_key: str = "EMPTY",
         device: Optional[str] = None,
         temperature: float = 0.5,
@@ -80,8 +79,7 @@ class JarvisVLAAgent:
     def act(
         self,
         obs: Dict[str, Any],
-        state: AgentState,
-        deterministic: bool = True,
+        state: AgentState
     ) -> Tuple[Any, AgentState]:
         """
         Generate action from observation.
@@ -89,16 +87,16 @@ class JarvisVLAAgent:
         Args:
             obs: Dict with 'image' key (numpy array)
             state: Current agent state
-            deterministic: Whether to use deterministic sampling
             
         Returns:
-            (action_dict, new_state)
+            (action_dict, new_state) or (None, state) if error occurs
         """        
         try:
             # Get image from observation
             image = obs.get("image")
             if image is None:
                 logger.warning("No image in observation, returning None")
+                state.first = False
                 return None, state
             
             # Get task text
@@ -115,6 +113,18 @@ class JarvisVLAAgent:
             
             if action is None:
                 logger.warning("Agent returned None action")
+                state.first = False
+                return None, state
+            
+            # Validate action format
+            if not isinstance(action, dict):
+                logger.error("Invalid action type: %s", type(action))
+                state.first = False
+                return None, state
+            
+            if "buttons" not in action or "camera" not in action:
+                logger.error("Action missing required keys: %s", action)
+                state.first = False
                 return None, state
             
             # Update state
@@ -132,96 +142,6 @@ class JarvisVLAAgent:
             logger.exception("Agent.act failed: %s", e)
             state.first = False
             return None, state
-
-            
-            # Update state memory with current output
-            new_state = AgentState(
-                memory={"last_output": output},
-                first=False,
-                idle_count=state.idle_count,
-                task_text=state.task_text,
-            )
-            
-            return actions[0], new_state
-            
-        except Exception as e:
-            logger.exception("Failed to generate action: %s", e)
-            return None, state
-        except Exception as e:
-            logger.exception("Agent.act failed: %s", e)
-            state.first = False
-            return None, state
-
-    def _build_messages(
-        self,
-        image: np.ndarray,
-        task_text: str,
-        state: AgentState,
-    ) -> list:
-        """Build message list for vLLM."""
-        messages = []
-        
-        if self.processor_wrapper is None:
-            # Fallback: simple text message
-            messages.append({
-                "role": "user",
-                "content": f"{task_text}\nGenerate action for this observation."
-            })
-            return messages
-        
-        # Use processor wrapper to create proper message
-        try:
-            # Convert image to PIL or base64 format expected by processor
-            image_input = self.processor_wrapper.create_image_input(image)
-            
-            # Create message with image
-            prompt = task_text if state.first else "\nobservation: "
-            message = self.processor_wrapper.create_message_vllm(
-                role="user",
-                input_type="image",
-                prompt=[prompt],
-                image=[image_input]
-            )
-            messages.append(message)
-            
-        except Exception as e:
-            logger.warning("Failed to create image message: %s, using text only", e)
-            messages.append({
-                "role": "user",
-                "content": f"{task_text}\nGenerate action."
-            })
-        
-        return messages
-
-    def _decode_actions(self, output: str) -> list:
-        """
-        Decode LLM output to action list.
-        
-        Returns:
-            List of action dicts with 'buttons' and 'camera' keys
-        """
-        if self.action_tokenizer is None:
-            logger.warning("No action_tokenizer, returning empty list")
-            return []
-        
-        try:
-            # Tokenize output
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(
-                "Qwen/Qwen2-VL-7B-Instruct",
-                trust_remote_code=True
-            )
-            token_ids = tokenizer(output)["input_ids"]
-            
-            # Decode using action tokenizer
-            actions = self.action_tokenizer.decode(token_ids)
-            
-            logger.debug("Decoded %d actions from output", len(actions))
-            return actions
-            
-        except Exception as e:
-            logger.exception("Failed to decode actions: %s", e)
-            return []
 
 
 

@@ -16,7 +16,7 @@ from src.server.session_manager import SessionManager
 from starlette.responses import PlainTextResponse
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
@@ -28,9 +28,8 @@ def main():
     parser.add_argument("--card-url", type=str, help="URL to advertise in the agent card")
     parser.add_argument("--base-url", type=str, default="http://localhost:9020/v1",
                         help="vLLM server URL")
-    parser.add_argument("--model-name", type=str, default="CraftJarvis/JarvisVLA-Qwen2-VL-7B",
+    parser.add_argument("--model-name", type=str, default="/workspace/models/JarvisVLA-Qwen2-VL-7B",
                         help="Model name")
-    parser.add_argument("--deterministic", action="store_true", default=False)
     parser.add_argument("--device", default=None)
     parser.add_argument("--state-ttl", type=int, default=3600)
     parser.add_argument("--temperature", type=float, default=0.5,
@@ -76,7 +75,6 @@ def main():
         base_url=args.base_url,
         model_name=args.model_name,
         device=args.device,
-        deterministic=args.deterministic,
         state_ttl_seconds=args.state_ttl,
         debug=True,
     )
@@ -111,7 +109,7 @@ def main():
         asgi_app,
         host=args.host,
         port=args.port,
-        log_level="debug",
+        log_level="info",
     )
 
 

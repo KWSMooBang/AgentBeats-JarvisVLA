@@ -20,11 +20,10 @@ from a2a.utils import new_agent_text_message
 from src.server.session_manager import SessionManager
 from src.protocol.models import InitPayload, ObservationPayload, AckPayload, ActionPayload
 from src.agent import JarvisVLAAgent, AgentState
-from src.action.pipeline import noop_action
+from src.action.action_space import noop_action
+from src.action.converter import ActionConverter
 
-logger = logging.getLogger("jarvisvla.purple.executor")
-logger.setLevel(logging.DEBUG)
-
+logger = logging.getLogger(__name__)
 
 def _noop_action_payload() -> Dict[str, Any]:
     """Return noop action payload."""
@@ -53,7 +52,6 @@ class Executor(AgentExecutor):
         *,
         base_url: str = "http://localhost:8000/v1",
         model_name: str = "CraftJarvis/JarvisVLA-Qwen2-VL-7B",
-        deterministic: bool = False,
         state_ttl_seconds: Optional[int] = 60 * 60,
         debug: bool = False,
         device: Optional[str] = None,
@@ -169,44 +167,115 @@ class Executor(AgentExecutor):
             self.agents[context_id] = agent
         return agent
 
-    def _make_agent_message(
+    async def _handle_init(
         self,
-        *,
-        task_id: str,
+        payload: Dict[str, Any],
         context_id: str,
-        payload_obj: Dict[str, Any] | BaseModel
+        task_id: str,
+        task_updater: TaskUpdater
     ) -> Message:
-        """Make agent Message with given payload object."""
-        if isinstance(payload_obj, BaseModel):
-            text = payload_obj.model_dump_json()
-        else:
-            text = json.dumps(payload_obj)
+        """Handle init message.
+        
+        Args:
+            payload: Init payload dict
+            context_id: Context identifier
+            task_id: Task identifier
+            task_updater: Task updater for emitting completion
             
-        return Message(
-            role=Role.agent,
-            task_id=task_id,
+        Returns:
+            Ack message
+        """
+        init = InitPayload.model_validate(payload)
+        logger.info("Init request: context=%s, task=%s", context_id, init.text[:100])
+
+        # Start session
+        self.sessions.start_new_task(
             context_id=context_id,
-            message_id=str(uuid.uuid4()),
-            parts=[Part(root=TextPart(text=text))],
+            task_text=init.text,
         )
 
-    async def _finalize(
+        # Create agent and initial state
+        agent = self._get_or_create_agent(context_id)
+        state = agent.initial_state(init.text)
+
+        self.agent_states[context_id] = state
+        self._last_actions[context_id] = noop_action()
+        self._touch(context_id)
+
+        # Create ack response
+        ack_payload = AckPayload(success=True, message="Initialization successful.")
+        response = new_agent_text_message(ack_payload.model_dump_json())
+        
+        # Complete task
+        await task_updater.complete(output=response)
+        return response
+
+    async def _handle_obs(
         self,
-        *,
-        event_queue,
-        task_id: str,
+        payload: Dict[str, Any],
         context_id: str,
-        message: Message
+        task_id: str,
+        task_updater: TaskUpdater
     ) -> Message:
-        """Emit exactly one terminal completion event if event_queue is provided."""
-        if event_queue is not None:
-            updater = TaskUpdater(
-                event_queue=event_queue,
-                task_id=task_id,
-                context_id=context_id,
-            )
-            await updater.complete(message=message)
-        return message
+        """Handle observation message.
+        
+        Args:
+            payload: Observation payload dict
+            context_id: Context identifier
+            task_id: Task identifier
+            task_updater: Task updater for emitting completion
+            
+        Returns:
+            Action message
+        """
+        obs = ObservationPayload.model_validate(payload)
+        
+        # Decode observation
+        image_rgb = self._decode_obs(obs.obs)
+        obs_dict = {"image": image_rgb, "step": obs.step}
+
+        # Update session
+        self.sessions.on_observation(context_id, obs.step)
+
+        # Get agent and state
+        agent = self._get_or_create_agent(context_id)
+        state = self.agent_states.get(context_id)
+
+        if state is None:
+            logger.warning("No state for context=%s, returning noop", context_id)
+            noop_payload = _noop_action_payload()
+            response = new_agent_text_message(json.dumps(noop_payload))
+            await task_updater.complete(output=response)
+            return response
+
+        # Generate action
+        action, new_state = agent.act(
+            obs=obs_dict,
+            state=state
+        )
+
+        # Update state
+        self.agent_states[context_id] = new_state
+        self._touch(context_id)
+        self._last_actions[context_id] = action
+
+        # Convert action format using ActionConverter
+        purple_action = ActionConverter.jarvisvla_to_purple(action)
+
+        # Create action response
+        action_payload = ActionPayload(
+            action_type="agent",
+            buttons=purple_action["buttons"],
+            camera=purple_action["camera"],
+        )
+        
+        response = new_agent_text_message(action_payload.model_dump_json())
+        
+        # Complete task
+        await task_updater.complete(output=response)
+        return response
+
+
 
     # ------------------------------------------------------------------
     # Main entry (IMPORTANT)
@@ -216,8 +285,14 @@ class Executor(AgentExecutor):
         """
         Execute agent action based on request.
         
-        - MUST return Message
-        - For A2A runtime: also emits exactly one terminal completion event
+        Dispatches to _handle_init or _handle_obs based on message type.
+        
+        Args:
+            context: Request context with message
+            event_queue: Event queue for task updates
+            
+        Returns:
+            Response message (ack for init, action for obs)
         """
         self._gc_agent_states()
 
@@ -234,152 +309,48 @@ class Executor(AgentExecutor):
             or getattr(context, "task_id", None) 
             or context_id
         )
+        
+        # Create task updater
+        task_updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=task_id,
+            context_id=context_id,
+        )
 
         try:
             if not payload_text:
                 logger.warning("No payload text, returning noop")
-                noop_msg = self._make_agent_message(
-                    task_id=task_id,
-                    context_id=context_id,
-                    payload_obj=_noop_action_payload(),
-                )
-                return await self._finalize(
-                    event_queue=event_queue,
-                    task_id=task_id,
-                    context_id=context_id,
-                    message=noop_msg
-                )
+                noop_payload = _noop_action_payload()
+                response = new_agent_text_message(json.dumps(noop_payload))
+                await task_updater.complete(output=response)
+                return response
 
             payload = json.loads(payload_text)
             payload_type = payload.get("type")
 
-            # ---------------- init ----------------
+            # Dispatch to appropriate handler
             if payload_type == "init":
-                init = InitPayload.model_validate(payload)
-                logger.info("Init request: context=%s, task=%s", context_id, init.text[:100])
-
-                self.sessions.start_new_task(
-                    context_id=context_id,
-                    task_text=init.text,
-                )
-
-                agent = self._get_or_create_agent(context_id)
-                state = agent.initial_state(init.text)
-
-                self.agent_states[context_id] = state
-                self._last_actions[context_id] = noop_action()
-                self._touch(context_id)
-
-                ack_payload = AckPayload(success=True, message="Initialization successful.")
-                ack_msg = self._make_agent_message(
-                    task_id=task_id,
-                    context_id=context_id,
-                    payload_obj=ack_payload
-                )
-                return await self._finalize(
-                    event_queue=event_queue,
-                    task_id=task_id,
-                    context_id=context_id,
-                    message=ack_msg
-                )
-
-            # ---------------- obs ----------------
-            if payload_type == "obs":
-                obs = ObservationPayload.model_validate(payload)
-                logger.debug("Obs request: context=%s, step=%d", context_id, obs.step)
-
-                # Decode observation
-                image_rgb = self._decode_obs(obs.obs)
-                obs_dict = {"image": image_rgb, "step": obs.step}
-
-                # Update session
-                self.sessions.on_observation(context_id, obs.step)
-
-                # Get agent and state
-                agent = self._get_or_create_agent(context_id)
-                state = self.agent_states.get(context_id)
-
-                if state is None:
-                    logger.warning("No state for context=%s, returning noop", context_id)
-                    noop_msg = self._make_agent_message(
-                        task_id=task_id,
-                        context_id=context_id,
-                        payload_obj=_noop_action_payload(),
-                    )
-                    return await self._finalize(
-                        event_queue=event_queue,
-                        task_id=task_id,
-                        context_id=context_id,
-                        message=noop_msg
-                    )
-
-                # Get policy output
-                action, new_state = agent.act(
-                    obs=obs_dict,
-                    state=state,
-                    deterministic=self.deterministic,
-                )
-
-                # Update state
-                self.agent_states[context_id] = new_state
-                self._touch(context_id)
-
-                # Store last action
-                self._last_actions[context_id] = action
-
-                # Build action message
-                action_payload = ActionPayload(
-                    action_type="agent",
-                    buttons=action["buttons"],
-                    camera=action["camera"],
-                )
-                
-                # Emit action message
-                action_msg = self._make_agent_message(
-                    task_id=task_id,
-                    context_id=context_id,
-                    payload_obj=action_payload
-                )
-
-                return await self._finalize(
-                    event_queue=event_queue,
-                    task_id=task_id,
-                    context_id=context_id,
-                    message=action_msg
-                )
-
-            # ---------------- unknown ----------------
-            logger.warning("Unknown payload type: %s", payload_type)
-            noop_msg = self._make_agent_message(
-                task_id=task_id,
-                context_id=context_id,
-                payload_obj=_noop_action_payload(),
-            )
-            return await self._finalize(
-                event_queue=event_queue,
-                task_id=task_id,
-                context_id=context_id,
-                message=noop_msg
-            )
+                return await self._handle_init(payload, context_id, task_id, task_updater)
+            elif payload_type == "obs":
+                return await self._handle_obs(payload, context_id, task_id, task_updater)
+            else:
+                logger.warning("Unknown payload type: %s", payload_type)
+                noop_payload = _noop_action_payload()
+                response = new_agent_text_message(json.dumps(noop_payload))
+                await task_updater.complete(output=response)
+                return response
 
         except Exception:
             logger.exception("[EXEC] fatal error")
-            noop_msg = self._make_agent_message(
-                task_id=task_id,
-                context_id=context_id,
-                payload_obj=_noop_action_payload(),
-            )
+            noop_payload = _noop_action_payload()
             try:
-                return await self._finalize(
-                    event_queue=event_queue,
-                    task_id=task_id,
-                    context_id=context_id,
-                    message=noop_msg
-                )
+                response = new_agent_text_message(json.dumps(noop_payload))
+                await task_updater.complete(output=response)
+                return response
             except Exception:
-                return new_agent_text_message(json.dumps(_noop_action_payload()))
+                return new_agent_text_message(json.dumps(noop_payload))
 
     async def cancel(self, context: RequestContext, event_queue=None) -> None:
         """Cancel handler (no-op for MCU)."""
-        logger.debug("Cancel called (no-op)")
+        logger.warning("Cancel called (no-op)")
         return
