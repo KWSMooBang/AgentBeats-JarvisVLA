@@ -1,9 +1,23 @@
+.env
+.DS_Store
+.python-version
+.venv/
+__pycache__/
+*.pyc
+
+*.mp4
+
+output/
+logs/
+record/
+tutorial/logs/
+tutorial/record/
+
 jarvisvla.egg-info/
 log/
 logs/
 wandb/
 
-
 data/
 logs/
 models/
@@ -18,31 +32,7 @@ ultron.egg-info/
 out
 tmp
 checkpoints
-
-*.pyc
 .gradio
-
-
-data/
-logs/
-log/
-models/
-checkpoints/
-submodules/
-__pycache__/
-out/
-tmp/
-temp/
-trash/
-wandb/
-record/
-ultron.egg-info/
-
 
 distill_sampler_model.yaml
 
-out
-tmp
-checkpoints
-
-*.pyc
