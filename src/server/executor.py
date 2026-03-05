@@ -59,7 +59,6 @@ class Executor(AgentExecutor):
         self.sessions = sessions
         self.base_url = base_url
         self.model_name = model_name
-        self.deterministic = deterministic
         self._state_ttl_seconds = state_ttl_seconds
         self._debug = bool(debug)
         self._device = device
@@ -207,7 +206,7 @@ class Executor(AgentExecutor):
         response = new_agent_text_message(ack_payload.model_dump_json())
         
         # Complete task
-        await task_updater.complete(output=response)
+        await task_updater.complete(message=response)
         return response
 
     async def _handle_obs(
@@ -245,7 +244,7 @@ class Executor(AgentExecutor):
             logger.warning("No state for context=%s, returning noop", context_id)
             noop_payload = _noop_action_payload()
             response = new_agent_text_message(json.dumps(noop_payload))
-            await task_updater.complete(output=response)
+            await task_updater.complete(message=response)
             return response
 
         # Generate action
@@ -272,7 +271,7 @@ class Executor(AgentExecutor):
         response = new_agent_text_message(action_payload.model_dump_json())
         
         # Complete task
-        await task_updater.complete(output=response)
+        await task_updater.complete(message=response)
         return response
 
 
@@ -322,7 +321,7 @@ class Executor(AgentExecutor):
                 logger.warning("No payload text, returning noop")
                 noop_payload = _noop_action_payload()
                 response = new_agent_text_message(json.dumps(noop_payload))
-                await task_updater.complete(output=response)
+                await task_updater.complete(message=response)
                 return response
 
             payload = json.loads(payload_text)
@@ -337,7 +336,7 @@ class Executor(AgentExecutor):
                 logger.warning("Unknown payload type: %s", payload_type)
                 noop_payload = _noop_action_payload()
                 response = new_agent_text_message(json.dumps(noop_payload))
-                await task_updater.complete(output=response)
+                await task_updater.complete(message=response)
                 return response
 
         except Exception:
@@ -345,7 +344,7 @@ class Executor(AgentExecutor):
             noop_payload = _noop_action_payload()
             try:
                 response = new_agent_text_message(json.dumps(noop_payload))
-                await task_updater.complete(output=response)
+                await task_updater.complete(message=response)
                 return response
             except Exception:
                 return new_agent_text_message(json.dumps(noop_payload))
