@@ -29,7 +29,7 @@ ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md setup.py ./
+COPY pyproject.toml uv.lock README.md setup.py requirements.txt ./
 COPY src ./src
 COPY jarvisvla ./jarvisvla
 COPY assets ./assets
