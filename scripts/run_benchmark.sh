@@ -39,7 +39,7 @@ VLM_MODEL="${VLM_MODEL:-Qwen/Qwen2.5-VL-72B-Instruct}"
 VLM_TEMPERATURE="${VLM_TEMPERATURE:-0.1}"
 
 # ── Task / output config ────────────────────────────────────────────────────
-TASKS_DIR="${TASKS_DIR:-assets/mcu_tasks}"
+TASKS_DIR="${TASKS_DIR:-./tasks}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs}"
 MAX_STEPS="${MAX_STEPS:-600}"
 OBS_SIZE="${OBS_SIZE:-128 128}"

@@ -18,7 +18,6 @@ jarvisvla.egg-info/
 wandb/
 
 data/
-models/
 checkpoints/
 submodules/
 out/
@@ -29,3 +28,4 @@ ultron.egg-info/
 
 .gradio
 
+models/*

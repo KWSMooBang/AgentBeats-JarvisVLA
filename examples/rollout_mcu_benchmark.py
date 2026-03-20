@@ -578,8 +578,7 @@ def resolve_tasks_dir(user_tasks_dir: str) -> str:
         return str(candidate)
 
     fallbacks = [
-        Path("/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks"),
-        Path("/workspace/woosung/AgentBeats-OpenHA/openagents/assets/mcu_tasks"),
+        Path("./tasks"),
     ]
     for fallback in fallbacks:
         if fallback.exists():
@@ -607,7 +606,7 @@ def main():
     parser.add_argument(
         "--tasks-dir",
         type=str,
-        default="/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks",
+        default="./tasks",
         help="Directory containing MCU task YAML files",
     )
     parser.add_argument(
@@ -622,7 +621,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/workspace/models/JarvisVLA-Qwen2-VL-7B",
+        default="./models/JarvisVLA-Qwen2-VL-7B",
         help="Local checkpoint path (used for tokenizer and backbone detection)",
     )
     parser.add_argument(
