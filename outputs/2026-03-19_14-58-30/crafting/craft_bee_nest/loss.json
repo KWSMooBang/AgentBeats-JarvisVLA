@@ -1,0 +1,11 @@
+{
+  "task_name": "craft_bee_nest",
+  "task_text": "create a bee nest-like structure",
+  "matched_key": null,
+  "instruction_type": "simple",
+  "agent_instruction": "create a bee nest-like structure",
+  "yaml_path": "/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks/crafting/craft_bee_nest.yaml",
+  "total_reward": 0.0,
+  "steps_taken": 600,
+  "success": false
+}

@@ -1,0 +1,11 @@
+{
+  "task_name": "combat_skeletons",
+  "task_text": "Defeat the nearby skeletons using weapons and protective gear.",
+  "matched_key": "kill_entity:skeleton",
+  "instruction_type": "normal",
+  "agent_instruction": "kill_entity:skeleton",
+  "yaml_path": "/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks/combat/combat_skeletons.yaml",
+  "total_reward": 0.0,
+  "steps_taken": 600,
+  "success": false
+}

@@ -1,0 +1,11 @@
+{
+  "task_name": "combat_witch",
+  "task_text": "Defeat the nearby witch using weapons and protective gear.",
+  "matched_key": "kill_entity:witch",
+  "instruction_type": "normal",
+  "agent_instruction": "kill_entity:witch",
+  "yaml_path": "/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks/combat/combat_witch.yaml",
+  "total_reward": 0.0,
+  "steps_taken": 600,
+  "success": false
+}

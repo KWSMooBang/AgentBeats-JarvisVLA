@@ -1,0 +1,11 @@
+{
+  "task_name": "craft_diorite",
+  "task_text": "craft diorite using cobblestone and nether quartz",
+  "matched_key": null,
+  "instruction_type": "simple",
+  "agent_instruction": "craft diorite using cobblestone and nether quartz",
+  "yaml_path": "/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks/crafting/craft_diorite.yaml",
+  "total_reward": 0.0,
+  "steps_taken": 600,
+  "success": false
+}

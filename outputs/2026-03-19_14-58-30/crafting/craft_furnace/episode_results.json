@@ -1,0 +1,11 @@
+{
+  "task_name": "craft_furnace",
+  "task_text": "Craft a furnace for smelting items.",
+  "matched_key": "craft_item:furnace",
+  "instruction_type": "recipe",
+  "agent_instruction": "craft_item:furnace",
+  "yaml_path": "/workspace/woosung/MCU-AgentBeats/MCU_benchmark/task_configs/tasks/crafting/craft_furnace.yaml",
+  "total_reward": 0.0,
+  "steps_taken": 600,
+  "success": false
+}

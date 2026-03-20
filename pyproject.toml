@@ -76,5 +76,3 @@ packages = {find = {include = ["jarvisvla*"]}}
 include-package-data = true
 zip-safe = false
 
-[tool.uv]
-dev-dependencies = []

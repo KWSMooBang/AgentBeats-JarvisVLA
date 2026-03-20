@@ -1,4 +1,6 @@
-# src/protocol/__init__.py
-from .models import InitPayload, ObservationPayload, AckPayload, ActionPayload
-
-__all__ = ["InitPayload", "ObservationPayload", "AckPayload", "ActionPayload"]
+from src.protocol.models import (
+    InitPayload,
+    ObservationPayload,
+    ActionPayload,
+    AckPayload,
+)

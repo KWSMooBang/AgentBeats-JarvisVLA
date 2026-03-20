@@ -31,13 +31,22 @@ INSTRUCTION_TEMPLATE = [
 ]
 
 class VLLM_AGENT:
-    def __init__(self,checkpoint_path, base_url, api_key="EMPTY",
-                 history_num=0,action_chunk_len=1, bpe=0,
-                 instruction_type:Literal['simple','recipe','normal'] = 'normal',
-                 temperature=0.5):
+    def __init__(
+        self,
+        checkpoint_path, 
+        base_url, 
+        api_key="EMPTY",
+        history_num=4, 
+        action_chunk_len=1, 
+        bpe=0,
+        instruction_type: Literal['simple','recipe','normal'] = 'normal',
+        temperature=0.7
+    ):
         
         self.LLM_backbone,self.VLM_backbone = load_model.load_visual_model(checkpoint_path=checkpoint_path)
-        self.action_tokenizer = action_mapping.OneActionTokenizer(tokenizer_type=self.LLM_backbone)
+        self.action_tokenizer = action_mapping.OneActionTokenizer(
+            tokenizer_type=self.LLM_backbone,
+        )
         
         self.prompt_library = load_json_file(Path(__file__).parent/"assets"/"instructions.json") #存储我写好的instructions
         self.recipe_fold=Path(__file__).parent/"assets"/"recipes" # 存储所有recipes的文件夹
@@ -110,7 +119,6 @@ class VLLM_AGENT:
         if item_name in self.recipes:
             return self.recipes[item_name]
         recipe_path = self.recipe_fold/f"{item_name}.json"
-        print(recipe_path)
         if not recipe_path.exists():
             self.recipes[item_name]= ""
             return ""
@@ -208,7 +216,7 @@ class VLLM_AGENT:
     def forward(self, observations, instructions, verbos=False, need_crafting_table=False):
         if self.actions:
             if verbos:
-                print(self.actions)
+                print("self.actions:", self.actions)
             if len(self.actions) > 1:
                 return self.actions.pop(0)
             else:
@@ -220,7 +228,7 @@ class VLLM_AGENT:
         method = self.method_map[need_crafting_table]
         prompts = []
         private_instruction = self.create_instruction(instructions[0], method=method)
-        #print(private_instruction)
+        # print("private_instruction:", private_instruction)
         thought= self.create_thought(instructions[0]) if self.instruction_type == "recipe" else ""
 
         if self.history_num:
@@ -236,7 +244,7 @@ class VLLM_AGENT:
                     prompt_input = "\nobservation: "
                 if not hdx: #hdx==0
                     prompt_input = private_instruction + prompt_input
-                #print(ac,prompt_input,)
+                # print(ac,prompt_input,)
                 messages.append(self.processor_wrapper.create_message_vllm(role="user",input_type="image",prompt=[prompt_input],image=[im]))
                 messages.append(self.processor_wrapper.create_message_vllm(role="assistant",input_type="text",prompt=[ac],))
             
@@ -247,13 +255,13 @@ class VLLM_AGENT:
             prompt_input = "\nobservation: "
         if not self.history_num:
             prompt_input = private_instruction + prompt_input
-        #print(prompt_input)
+        # print(prompt_input)
 
         messages.append(self.processor_wrapper.create_message_vllm(role="user",input_type="image",prompt=[prompt_input],image=[image]))
         
         open_logprobs = False
         if verbos:
-            print(prompts)
+            # print("messages:", messages)
             open_logprobs = True
         
         chat_completion = self.client.chat.completions.create(
@@ -273,7 +281,7 @@ class VLLM_AGENT:
         if self.LLM_backbone in {"qwen2_vl"}:
             outputs = self.tokenizer(outputs)["input_ids"]
 
-        actions =  self.action_tokenizer.decode(outputs)
+        actions = self.action_tokenizer.decode(outputs)
 
         len_action = min(self.action_chunk_len,len(actions))
         self.actions = actions[:len_action]
