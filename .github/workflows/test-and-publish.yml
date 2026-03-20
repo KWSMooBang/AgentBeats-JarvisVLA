@@ -2,11 +2,11 @@ name: Test and Publish AgentBeats JarvisVLA
 
 on:
   pull_request:
-    branches:
-      - main
   push:
     branches:
       - main
+      - master
+      - jarvis+scripted-policy
     tags:
       - "v*"
 
