@@ -64,6 +64,12 @@ dependencies = [
     "minestudio @ git+https://github.com/CraftJarvis/MineStudio.git",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/CraftJarvis/JarvisVLA"
 

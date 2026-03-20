@@ -44,7 +44,7 @@ class VLMStateChecker:
         self,
         api_key: str = "EMPTY",
         base_url: str = "https://api.openai.com/v1",
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4o",
         temperature: float = 0.1,
         max_tokens: int = 64,
     ):
@@ -104,6 +104,7 @@ class VLMStateChecker:
             "Reply with ONLY 'Yes' or 'No'."
         )
         answer = self.query(image, prompt)
+        print(f"VLM prompt: {prompt}\nVLM answer: {answer}")
         return answer.lower().startswith("yes")
 
     def describe_scene(self, image: np.ndarray) -> str:

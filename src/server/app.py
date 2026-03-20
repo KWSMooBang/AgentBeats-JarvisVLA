@@ -129,6 +129,18 @@ def main():
     parser.add_argument("--vlm-model", type=str, default="gpt-4o-mini")
     parser.add_argument("--vlm-temperature", type=float, default=0.1)
 
+    # JarvisVLA instruction runner (required)
+    parser.add_argument("--vla-enabled", action="store_true")
+    parser.add_argument("--vla-checkpoint-path", type=str, default="")
+    parser.add_argument("--vla-url", type=str, default="http://localhost:8000/v1")
+    parser.add_argument("--vla-api-key", type=str, default="EMPTY")
+    parser.add_argument("--vla-history-num", type=int, default=4)
+    parser.add_argument("--vla-action-chunk-len", type=int, default=1)
+    parser.add_argument("--vla-bpe", type=int, default=0)
+    parser.add_argument("--vla-instruction-type", type=str, default="normal")
+    parser.add_argument("--vla-temperature", type=float, default=0.7)
+    parser.add_argument("--vla-no-camera-convert", action="store_true")
+
     parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args()
@@ -145,12 +157,29 @@ def main():
         "model": args.vlm_model,
         "temperature": args.vlm_temperature,
     }
+    vla_cfg = {
+        # VLA path is mandatory for this agent.
+        "enabled": True,
+        "checkpoint_path": args.vla_checkpoint_path,
+        "base_url": args.vla_url,
+        "api_key": args.vla_api_key,
+        "history_num": args.vla_history_num,
+        "action_chunk_len": args.vla_action_chunk_len,
+        "bpe": args.vla_bpe,
+        "instruction_type": args.vla_instruction_type,
+        "temperature": args.vla_temperature,
+        "convert_camera_21_to_11": not args.vla_no_camera_convert,
+    }
+
+    if not args.vla_checkpoint_path:
+        parser.error("--vla-checkpoint-path is required (VLA is mandatory)")
 
     sessions = SessionManager()
     executor = PurpleExecutor(
         sessions=sessions,
         planner_cfg=planner_cfg,
         vlm_cfg=vlm_cfg,
+        vla_cfg=vla_cfg,
         device=args.device,
     )
 

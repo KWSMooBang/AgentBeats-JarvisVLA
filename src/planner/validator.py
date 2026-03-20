@@ -1,5 +1,5 @@
 """
-Policy Spec Validator
+Plan Validator
 
 Validates the structural and semantic correctness of FSM JSON
 produced by the LLM Planner before execution.
@@ -7,35 +7,40 @@ produced by the LLM Planner before execution.
 
 from __future__ import annotations
 
+import difflib
 import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from src.planner.instruction_registry import (
+    canonicalize_instruction_key,
+    get_instruction_keys,
+    is_strict_instruction_key,
+    instructions_registry_available,
+)
+from src.planner.spec_format import to_canonical_spec
 
-KNOWN_PRIMITIVES = frozenset({
-    # Layer 1 — micro
-    "noop", "turn_camera", "scan_left_right", "scan_360",
-    "move_forward", "move_backward", "strafe_left", "strafe_right",
-    "jump_forward", "sprint_forward", "jump",
-    "attack_hold", "attack_forward", "use_once", "use_hold",
-    "select_hotbar", "open_inventory", "close_inventory", "drop_item",
-    "look_down", "look_up", "sneak_toggle",
-    # Layer 2 — perceptual
-    "align_to_target", "approach_target", "mine_target_block",
-    "attack_target_entity", "search_and_face", "navigate_to_target",
-})
+logger = logging.getLogger(__name__)
 
 KNOWN_CONDITIONS = frozenset({
     "always", "vlm_check", "inventory_has", "timeout",
-    "retry_exhausted", "primitive_success", "scene_check",
+    "retry_exhausted", "scene_check",
 })
 
+KNOWN_INSTRUCTION_TYPES = frozenset({"auto", "simple", "normal", "recipe"})
 
-class PolicySpecValidator:
-    """Validates a Policy Spec dict and returns a list of error strings."""
+
+class PlanValidator:
+    """Validates a plan dict and returns a list of error strings."""
 
     def validate(self, spec: dict[str, Any]) -> list[str]:
         errors: list[str] = []
+
+        spec = to_canonical_spec(spec)
+
+        registry_ok = instructions_registry_available()
+        instruction_keys = get_instruction_keys() if registry_ok else set()
+        if not registry_ok:
+            errors.append("instructions.json registry is unavailable; cannot validate instruction keys")
 
         for field in ("task", "states", "initial_state", "global_config"):
             if field not in spec:
@@ -62,17 +67,50 @@ class PolicySpecValidator:
                     errors.append(f"Terminal state '{name}' missing 'result'")
                 continue
 
-            if "primitives" not in sdef:
-                errors.append(f"State '{name}' missing 'primitives'")
+            is_fallback_state = name == "fallback"
+
+            has_instruction = "instruction" in sdef
+            if not has_instruction:
+                errors.append(f"State '{name}' missing required 'instruction'")
+            else:
+                instruction = sdef.get("instruction")
+                if not isinstance(instruction, str) or not instruction.strip():
+                    errors.append(
+                        f"State '{name}' has invalid 'instruction' (must be non-empty string)"
+                    )
+                elif registry_ok and not is_fallback_state:
+                    canonical = canonicalize_instruction_key(instruction)
+                    if canonical is None or canonical not in instruction_keys:
+                        suggestions = difflib.get_close_matches(
+                            instruction,
+                            sorted(instruction_keys),
+                            n=3,
+                            cutoff=0.65,
+                        )
+                        hint = f" Did you mean: {', '.join(suggestions)}" if suggestions else ""
+                        errors.append(
+                            f"State '{name}' instruction '{instruction}' is not a valid instructions.json key.{hint}"
+                        )
+                    elif not is_strict_instruction_key(canonical):
+                        errors.append(
+                            f"State '{name}' instruction '{instruction}' must use strict prefix:item format"
+                        )
+                    elif instruction != canonical:
+                        errors.append(
+                            f"State '{name}' instruction '{instruction}' must use canonical key '{canonical}'"
+                        )
+
+            if "instruction_type" not in sdef:
+                errors.append(f"State '{name}' missing required 'instruction_type'")
+            else:
+                instruction_type = sdef.get("instruction_type")
+                if instruction_type not in KNOWN_INSTRUCTION_TYPES:
+                    errors.append(
+                        f"Unknown instruction_type '{instruction_type}' in state '{name}'"
+                    )
+
             if "transitions" not in sdef:
                 errors.append(f"State '{name}' missing 'transitions'")
-
-            for prim in sdef.get("primitives", []):
-                pname = prim.get("name")
-                if pname not in KNOWN_PRIMITIVES:
-                    errors.append(
-                        f"Unknown primitive '{pname}' in state '{name}'"
-                    )
 
             for trans in sdef.get("transitions", []):
                 cond = trans.get("condition", {})

@@ -43,7 +43,7 @@ class VLLM_AGENT:
         temperature=0.7
     ):
         
-        self.LLM_backbone,self.VLM_backbone = load_model.load_visual_model(checkpoint_path=checkpoint_path)
+        self.LLM_backbone, self.VLM_backbone = load_model.load_visual_model(checkpoint_path=checkpoint_path)
         self.action_tokenizer = action_mapping.OneActionTokenizer(
             tokenizer_type=self.LLM_backbone,
         )

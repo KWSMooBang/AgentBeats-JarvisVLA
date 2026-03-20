@@ -5,7 +5,7 @@ custom_init_commands:
 - /give @s minecraft:arrow 64
 - /give @s minecraft:iron_sword
 - /give @s minecraft:golden_carrot 10
-text: hunt a horse using a sword or bow
+text: hunt a nearby horse using a sword or bow
 thinking: '- In order to hunt a horse, we need a weapon, such as a sword or bow, and
   have a horse nearby.'
 reward_cfg:

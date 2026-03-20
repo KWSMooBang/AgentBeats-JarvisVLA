@@ -2,11 +2,11 @@ custom_init_commands:
 - /give @p minecraft:bow
 - /give @p minecraft:arrow 16
 - /time set night
-- /summon minecraft:phantom ~2 ~ ~
+- /execute at @p run summon minecraft:phantom ^2 ^2 ^3
 defaults:
 - base
 - _self_
-text: Shoot a phantom using a bow and arrows.
+text: Shoot a nearby phantom using a bow and arrows.
 reward_cfg:
 - event: kill_entity
   identity: kill_phantom

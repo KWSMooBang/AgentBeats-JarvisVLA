@@ -39,19 +39,24 @@ class MockVLMChecker:
 
 
 class TestFSMExecutor:
+    @staticmethod
+    def _mock_instruction_runner(image, instruction, instruction_type, state_def):
+        return {
+            "__action_format__": "agent",
+            "action": {"buttons": [1], "camera": [60]},
+        }
+
     def _simple_spec(self):
         return {
             "task": "test",
-            "global_config": {"max_total_steps": 50, "vlm_check_interval": 10},
+            "global_config": {"max_total_steps": 50, "vlm_check_interval": 1},
             "initial_state": "step1",
             "states": {
                 "step1": {
                     "description": "do something",
-                    "primitives": [
-                        {"name": "move_forward", "params": {"n_steps": 5}}
-                    ],
+                    "instruction": "drop:mossy_stone_brick_slab",
                     "transitions": [
-                        {"condition": {"type": "always"}, "next_state": "done"}
+                        {"condition": {"type": "timeout", "max_steps": 5}, "next_state": "done"}
                     ],
                 },
                 "done": {"terminal": True, "description": "finished", "result": "success"},
@@ -60,7 +65,11 @@ class TestFSMExecutor:
 
     def test_simple_execution(self):
         vlm = MockVLMChecker()
-        exe = FSMExecutor(policy_spec=self._simple_spec(), vlm_checker=vlm)
+        exe = FSMExecutor(
+            plan=self._simple_spec(),
+            vlm_checker=vlm,
+            instruction_runner=self._mock_instruction_runner,
+        )
         img = np.zeros((64, 64, 3), dtype=np.uint8)
 
         actions = []
@@ -71,21 +80,19 @@ class TestFSMExecutor:
             actions.append(a)
 
         assert len(actions) == 5
-        assert all(a["forward"] == 1 for a in actions)
+        assert all(a["__action_format__"] == "agent" for a in actions)
         assert exe.finished
         assert exe.result == "success"
 
     def test_vlm_check_transition(self):
         spec = {
             "task": "test",
-            "global_config": {"max_total_steps": 100, "vlm_check_interval": 5},
+            "global_config": {"max_total_steps": 100, "vlm_check_interval": 1},
             "initial_state": "look",
             "states": {
                 "look": {
                     "description": "scan",
-                    "primitives": [
-                        {"name": "noop", "params": {"n_steps": 3}}
-                    ],
+                    "instruction": "drop:mossy_stone_brick_slab",
                     "transitions": [
                         {
                             "condition": {"type": "vlm_check", "query": "Is there a tree?"},
@@ -98,7 +105,11 @@ class TestFSMExecutor:
             },
         }
         vlm = MockVLMChecker(yes_no_answers={"tree": True})
-        exe = FSMExecutor(policy_spec=spec, vlm_checker=vlm)
+        exe = FSMExecutor(
+            plan=spec,
+            vlm_checker=vlm,
+            instruction_runner=self._mock_instruction_runner,
+        )
         img = np.zeros((64, 64, 3), dtype=np.uint8)
 
         for _ in range(20):
@@ -117,9 +128,7 @@ class TestFSMExecutor:
             "states": {
                 "loop": {
                     "description": "infinite loop",
-                    "primitives": [
-                        {"name": "noop", "params": {"n_steps": 3}}
-                    ],
+                    "instruction": "drop:mossy_stone_brick_slab",
                     "transitions": [
                         {"condition": {"type": "always"}, "next_state": "loop"}
                     ],
@@ -128,7 +137,11 @@ class TestFSMExecutor:
             },
         }
         vlm = MockVLMChecker()
-        exe = FSMExecutor(policy_spec=spec, vlm_checker=vlm)
+        exe = FSMExecutor(
+            plan=spec,
+            vlm_checker=vlm,
+            instruction_runner=self._mock_instruction_runner,
+        )
         img = np.zeros((64, 64, 3), dtype=np.uint8)
 
         for _ in range(50):
@@ -138,3 +151,48 @@ class TestFSMExecutor:
 
         assert exe.finished
         assert exe.result == "global_timeout"
+
+    def test_instruction_driven_state(self):
+        class MockInstructionRunner:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, image, instruction, instruction_type, state_def):
+                self.calls += 1
+                return {
+                    "__action_format__": "agent",
+                    "action": {"buttons": [1], "camera": [60]},
+                }
+
+        spec = {
+            "task": "test",
+            "global_config": {"max_total_steps": 20, "vlm_check_interval": 1},
+            "initial_state": "drop_state",
+            "states": {
+                "drop_state": {
+                    "description": "drop one item",
+                    "instruction": "drop:mossy_stone_brick_slab",
+                    "instruction_type": "normal",
+                    "transitions": [
+                        {"condition": {"type": "timeout", "max_steps": 3}, "next_state": "done"}
+                    ],
+                },
+                "done": {"terminal": True, "description": "ok", "result": "success"},
+            },
+        }
+        runner = MockInstructionRunner()
+        vlm = MockVLMChecker()
+        exe = FSMExecutor(plan=spec, vlm_checker=vlm, instruction_runner=runner)
+        img = np.zeros((64, 64, 3), dtype=np.uint8)
+
+        actions = []
+        for _ in range(20):
+            a = exe.step(img)
+            if a is None:
+                break
+            actions.append(a)
+
+        assert len(actions) == 3
+        assert runner.calls == 3
+        assert exe.finished
+        assert exe.result == "success"

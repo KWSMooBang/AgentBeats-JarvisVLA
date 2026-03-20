@@ -41,6 +41,8 @@ MCU_CATEGORIES = [
     "motion", "tool_use", "trapping",
 ]
 
+LONG_HORIZON_CATEGORIES = {"ender_dragon", "mine_diamond_from_scratch"}
+
 
 # ======================================================================
 # MCU task discovery
@@ -69,10 +71,10 @@ def load_task_config(yaml_path: Path) -> Dict[str, Any]:
 def init_env(
     task_config: Dict[str, Any],
     rollout_path: str,
-    obs_size: Tuple[int, int] = (224, 224),
+    obs_size: Tuple[int, int] = (640, 360),
     render_size: Tuple[int, int] = (640, 360),
     max_steps: int = 600,
-    fps: int = 30,
+    fps: int = 20,
 ):
     from minestudio.simulator import MinecraftSim
     from minestudio.simulator.callbacks import (
@@ -115,8 +117,16 @@ def run_single_task(
     verbose: bool,
 ) -> Dict[str, Any]:
     task_name = yaml_path.stem
+    task_category = yaml_path.parent.name
     task_config = load_task_config(yaml_path)
     task_text = task_config.get("text", task_name).strip()
+    task_horizon = "long" if task_category in LONG_HORIZON_CATEGORIES else "short"
+    planner_task_text = (
+        f"[task_name: {task_name}]\n"
+        f"[task_category: {task_category}]\n"
+        f"[task_horizon: {task_horizon}]\n"
+        f"{task_text}"
+    )
     rollout_path = str(output_dir / task_name)
 
     print(f"\n{'='*70}")
@@ -132,7 +142,7 @@ def run_single_task(
         max_steps=max_steps,
     )
 
-    agent.reset(task_text=task_text, episode_dir=rollout_path)
+    agent.reset(task_text=planner_task_text, episode_dir=rollout_path)
     state = agent.initial_state(task_text=task_text)
 
     os.makedirs(rollout_path, exist_ok=True)
@@ -140,11 +150,13 @@ def run_single_task(
         json.dump({"task_name": task_name, "yaml_path": str(yaml_path), **task_config}, f, indent=2, ensure_ascii=False)
 
     obs, info = env.reset()
+    env.action_type = "agent"
     total_reward = 0.0
     step = 0
     start_time = time.time()
 
     env_error = False
+    env_error_message = ""
     for step in range(1, max_steps + 1):
         image = obs.get("image", obs.get("pov"))
         action, state = agent.act(obs={"image": image}, state=state)
@@ -158,11 +170,13 @@ def run_single_task(
         except Exception as e:
             logger.error("[%s] env.step() crashed at step %d: %s", task_name, step, e)
             env_error = True
+            env_error_message = str(e)
             break
 
         if isinstance(info, dict) and "error" in info:
             logger.error("[%s] env reported error at step %d: %s", task_name, step, info["error"])
             env_error = True
+            env_error_message = str(info["error"])
             break
 
         total_reward += reward
@@ -185,11 +199,15 @@ def run_single_task(
     success = total_reward > 0 and not env_error
     result = {
         "task_name": task_name,
+        "task_category": task_category,
+        "task_horizon": task_horizon,
         "task_text": task_text,
+        "planner_task_text": planner_task_text,
         "total_reward": float(total_reward),
         "steps_taken": step,
         "success": success,
         "env_error": env_error,
+        "env_error_message": env_error_message,
         "fsm_result": agent._executor.result if agent._executor else None,
         "fsm_finished": agent._executor.finished if agent._executor else None,
         "vlm_calls": agent.vlm_checker.call_count,
@@ -201,7 +219,6 @@ def run_single_task(
 
     status = "SUCCESS" if success else "FAIL"
     print(f"  [{status}] reward={total_reward:.2f}  steps={step}  time={elapsed:.1f}s")
-
     return result
 
 
@@ -315,7 +332,7 @@ def main():
     parser.add_argument("--tasks-dir", type=str, default="assets/mcu_tasks")
     parser.add_argument("--output-dir", type=str, default="./outputs")
     parser.add_argument("--max-steps", type=int, default=600)
-    parser.add_argument("--obs-size", type=int, nargs=2, default=[224, 224])
+    parser.add_argument("--obs-size", type=int, nargs=2, default=[640, 360])
     parser.add_argument("--verbose", action="store_true", default=True)
 
     # LLM Planner
@@ -330,9 +347,20 @@ def main():
     parser.add_argument("--vlm-model", type=str, default="gpt-4o-mini")
     parser.add_argument("--vlm-temperature", type=float, default=0.1)
 
-    # Manual policy spec (skip LLM for a single task)
-    parser.add_argument("--policy-spec", type=str, default=None,
-                        help="Path to a pre-written policy spec JSON (single-task mode only)")
+    # JarvisVLA instruction runner (required)
+    parser.add_argument("--vla-checkpoint-path", type=str, required=True)
+    parser.add_argument("--vla-url", type=str, default="http://localhost:9020/v1")
+    parser.add_argument("--vla-api-key", type=str, default="EMPTY")
+    parser.add_argument("--vla-history-num", type=int, default=4)
+    parser.add_argument("--vla-action-chunk-len", type=int, default=1)
+    parser.add_argument("--vla-bpe", type=int, default=0)
+    parser.add_argument("--vla-instruction-type", type=str, default="normal")
+    parser.add_argument("--vla-temperature", type=float, default=0.7)
+    parser.add_argument("--vla-no-camera-convert", action="store_true")
+
+    # Manual plan (skip LLM for a single task)
+    parser.add_argument("--plan", type=str, default=None,
+                        help="Path to a pre-written plan JSON (single-task mode only)")
     parser.add_argument("--task", type=str, default=None,
                         help="Single task text (bypasses MCU category selection)")
 
@@ -362,30 +390,49 @@ def main():
         "model": args.vlm_model,
         "temperature": args.vlm_temperature,
     }
+    vla_cfg = {
+        "enabled": True,
+        "checkpoint_path": args.vla_checkpoint_path,
+        "base_url": args.vla_url,
+        "api_key": args.vla_api_key,
+        "history_num": args.vla_history_num,
+        "action_chunk_len": args.vla_action_chunk_len,
+        "bpe": args.vla_bpe,
+        "instruction_type": args.vla_instruction_type,
+        "temperature": args.vla_temperature,
+        "convert_camera_21_to_11": not args.vla_no_camera_convert,
+    }
 
     agent = ScriptedPolicyAgent(
         planner_cfg=planner_cfg,
         vlm_cfg=vlm_cfg,
-        action_format="agent",
+        vla_cfg=vla_cfg,
         output_dir=args.output_dir,
     )
 
     # --- Single task mode (--task) ---
     if args.task:
-        if args.policy_spec:
-            with open(args.policy_spec) as f:
-                spec = json.load(f)
-            logger.info("Using pre-written policy spec: %s", args.policy_spec)
+        if args.plan:
+            with open(args.plan) as f:
+                plan = json.load(f)
+            logger.info("Using pre-written plan: %s", args.plan)
             from src.executor.fsm_executor import FSMExecutor
-            agent._policy_spec = spec
-            agent._executor = FSMExecutor(policy_spec=spec, vlm_checker=agent.vlm_checker)
+            agent._plan = plan
+            agent._executor = FSMExecutor(
+                plan=plan,
+                vlm_checker=agent.vlm_checker,
+                instruction_runner=agent._run_state_instruction,
+            )
         else:
             agent.reset(task_text=args.task)
 
         try:
             from minestudio.simulator import MinecraftSim
-            env = MinecraftSim(obs_size=tuple(args.obs_size))
+            env = MinecraftSim(
+                obs_size=tuple(args.obs_size)
+            )
             obs, info = env.reset()
+            env.action_type = "agent"
             state = agent.initial_state(task_text=args.task)
             total_reward = 0.0
 
@@ -403,7 +450,7 @@ def main():
             logger.info("Done: steps=%d  reward=%.2f", step, total_reward)
             env.close()
         except ImportError:
-            logger.warning("minestudio not installed — dry-run mode (policy spec saved)")
+            logger.warning("minestudio not installed — dry-run mode (plan saved)")
         return
 
     # --- Category benchmark mode ---

@@ -49,13 +49,14 @@ class PurpleExecutor:
         sessions: SessionManager,
         planner_cfg: Optional[dict] = None,
         vlm_cfg: Optional[dict] = None,
+        vla_cfg: Optional[dict] = None,
         device: str = "cuda",
     ):
         self.sessions = sessions
         self.agent = ScriptedPolicyAgent(
             planner_cfg=planner_cfg or {},
             vlm_cfg=vlm_cfg or {},
-            action_format="agent",
+            vla_cfg=vla_cfg or {},
             device=device,
         )
         self.agent_states: Dict[str, AgentState] = {}

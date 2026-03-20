@@ -24,10 +24,26 @@ logger = logging.getLogger(__name__)
 
 _CAMERA_CENTER = 60  # center of 11×11 grid
 
+_ENV_NOOP_ACTION_TEMPLATE: Dict[str, Any] = {
+    "hotbar.1": 0, "hotbar.2": 0, "hotbar.3": 0,
+    "hotbar.4": 0, "hotbar.5": 0, "hotbar.6": 0,
+    "hotbar.7": 0, "hotbar.8": 0, "hotbar.9": 0,
+    "forward": 0, "back": 0, "left": 0, "right": 0,
+    "sprint": 0, "sneak": 0, "use": 0, "drop": 0,
+    "attack": 0, "jump": 0, "inventory": 0,
+    "camera": np.array([0.0, 0.0]),
+}
+
+
+def _noop_env_action() -> Dict[str, Any]:
+    action = dict(_ENV_NOOP_ACTION_TEMPLATE)
+    action["camera"] = np.array([0.0, 0.0])
+    return action
+
 
 def noop_agent_action() -> Dict[str, Any]:
     """No-op in Purple Agent compact format."""
-    return {"buttons": [0], "camera": [_CAMERA_CENTER]}
+    return {"buttons": np.array([0]), "camera": np.array([_CAMERA_CENTER])}
 
 
 # ======================================================================
@@ -154,9 +170,7 @@ class ActionConverter:
             return self._action_transformer.policy2env(factored)
         except Exception as e:
             logger.exception("minestudio reverse conversion failed: %s", e)
-            from src.primitives.atomic import make_env_action
-            return make_env_action()
+            return _noop_env_action()
 
     def _agent_to_env_fallback(self, agent_action: dict) -> dict:
-        from src.primitives.atomic import make_env_action
-        return make_env_action()
+        return _noop_env_action()
