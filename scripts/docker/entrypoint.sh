@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Load .env if present so planner-related config can be managed centrally.
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$PROJECT_DIR/.env"
+  set +a
+fi
+
 VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
 VLLM_PORT="${VLLM_PORT:-9020}"
 VLA_MODEL_PATH="${VLA_MODEL_PATH:-/models/JarvisVLA-Qwen2-VL-7B}"
@@ -14,17 +25,12 @@ VLLM_LIMIT_MM_PER_PROMPT="${VLLM_LIMIT_MM_PER_PROMPT:-image=5}"
 VLLM_START_TIMEOUT="${VLLM_START_TIMEOUT:-300}"
 
 PURPLE_HOST="${PURPLE_HOST:-0.0.0.0}"
-PURPLE_PORT="${PURPLE_PORT:-9009}"
+PURPLE_PORT="${PURPLE_PORT:-9019}"
 
-PLANNER_API_KEY="${PLANNER_API_KEY:-EMPTY}"
-PLANNER_URL="${PLANNER_URL:-https://api.tokenfactory.nebius.com/v1/}"
-PLANNER_MODEL="${PLANNER_MODEL:-openai/gpt-oss-120b-fast}"
+PLANNER_API_KEY="${PLANNER_API_KEY:-${API_KEY:-EMPTY}}"
+PLANNER_URL="${PLANNER_URL:-${URL:-https://api.tokenfactory.nebius.com/v1/}}"
+PLANNER_MODEL="${PLANNER_MODEL:-${MODEL:-openai/gpt-oss-120b-fast}}"
 PLANNER_TEMPERATURE="${PLANNER_TEMPERATURE:-0.2}"
-
-VLM_API_KEY="${VLM_API_KEY:-EMPTY}"
-VLM_URL="${VLM_URL:-https://api.tokenfactory.nebius.com/v1/}"
-VLM_MODEL="${VLM_MODEL:-Qwen/Qwen2.5-VL-72B-Instruct}"
-VLM_TEMPERATURE="${VLM_TEMPERATURE:-0.1}"
 
 VLA_API_KEY="${VLA_API_KEY:-EMPTY}"
 VLA_HISTORY_NUM="${VLA_HISTORY_NUM:-4}"
@@ -90,10 +96,6 @@ exec uv run python -m src.server.app \
   --planner-url "${PLANNER_URL}" \
   --planner-model "${PLANNER_MODEL}" \
   --planner-temperature "${PLANNER_TEMPERATURE}" \
-  --vlm-api-key "${VLM_API_KEY}" \
-  --vlm-url "${VLM_URL}" \
-  --vlm-model "${VLM_MODEL}" \
-  --vlm-temperature "${VLM_TEMPERATURE}" \
   --vla-checkpoint-path "${VLA_MODEL_PATH}" \
   --vla-url "${VLA_BASE_URL}" \
   --vla-api-key "${VLA_API_KEY}" \

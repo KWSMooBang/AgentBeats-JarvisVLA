@@ -21,22 +21,16 @@ if [[ -f "$PROJECT_DIR/.env" ]]; then
 fi
 
 # ── Category (first positional arg, or default) ─────────────────────────────
-CATEGORY="${1:-combat}"
+CATEGORY="${1:-mine_diamond_from_scratch}"
 
 # ── GPU ──────────────────────────────────────────────────────────────────────
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # ── LLM Planner config ──────────────────────────────────────────────────────
-PLANNER_API_KEY="${PLANNER_API_KEY:-${NEBIUS_API_KEY:-EMPTY}}"
-PLANNER_URL="${PLANNER_URL:-https://api.tokenfactory.nebius.com/v1/}"
-PLANNER_MODEL="${PLANNER_MODEL:-openai/gpt-oss-120b-fast}"
+PLANNER_API_KEY="${PLANNER_API_KEY:-${API_KEY:-EMPTY}}"
+PLANNER_URL="${PLANNER_URL:-${URL:-https://api.tokenfactory.nebius.com/v1/}}"
+PLANNER_MODEL="${PLANNER_MODEL:-${MODEL:-openai/gpt-oss-120b-fast}}"
 PLANNER_TEMPERATURE="${PLANNER_TEMPERATURE:-0.2}"
-
-# ── VLM State Checker config ────────────────────────────────────────────────
-VLM_API_KEY="${VLM_API_KEY:-${NEBIUS_API_KEY:-EMPTY}}"
-VLM_URL="${VLM_URL:-https://api.tokenfactory.nebius.com/v1/}"
-VLM_MODEL="${VLM_MODEL:-Qwen/Qwen2.5-VL-72B-Instruct}"
-VLM_TEMPERATURE="${VLM_TEMPERATURE:-0.1}"
 
 # ── JarvisVLA config (required) ─────────────────────────────────────────────
 VLA_CHECKPOINT_PATH="${VLA_CHECKPOINT_PATH:-./models/JarvisVLA-Qwen2-VL-7B}"
@@ -56,7 +50,7 @@ fi
 # ── Task / output config ────────────────────────────────────────────────────
 TASKS_DIR="${TASKS_DIR:-./tasks}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs}"
-MAX_STEPS="${MAX_STEPS:-300}"
+MAX_STEPS="${MAX_STEPS:-12000}"
 OBS_SIZE="${OBS_SIZE:-640 360}"
 
 # ==============================================================================
@@ -65,7 +59,6 @@ echo "  Scripted Policy — MCU Benchmark"
 echo "========================================"
 echo "  Category       : $CATEGORY"
 echo "  Planner model  : $PLANNER_MODEL"
-echo "  VLM model      : $VLM_MODEL  ($VLM_URL)"
 echo "  VLA model path : $VLA_CHECKPOINT_PATH"
 echo "  VLA endpoint   : $VLA_URL"
 echo "  Max steps      : $MAX_STEPS"
@@ -84,10 +77,6 @@ python examples/run_standalone.py \
     --planner-url "$PLANNER_URL" \
     --planner-model "$PLANNER_MODEL" \
     --planner-temperature "$PLANNER_TEMPERATURE" \
-    --vlm-api-key "$VLM_API_KEY" \
-    --vlm-url "$VLM_URL" \
-    --vlm-model "$VLM_MODEL" \
-    --vlm-temperature "$VLM_TEMPERATURE" \
     --vla-checkpoint-path "$VLA_CHECKPOINT_PATH" \
     --vla-url "$VLA_URL" \
     --vla-api-key "$VLA_API_KEY" \

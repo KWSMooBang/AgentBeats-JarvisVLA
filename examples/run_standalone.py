@@ -2,7 +2,7 @@
 MCU Benchmark Runner for Scripted Policy Agent
 
 Loads MCU task YAML configurations, lets the user pick a category,
-then runs every task in that category through the ScriptedPolicyAgent
+then runs every task in that category through the MinecraftPurpleAgent
 inside a MineStudio environment loop (no A2A server required).
 
 Usage:
@@ -121,12 +121,7 @@ def run_single_task(
     task_config = load_task_config(yaml_path)
     task_text = task_config.get("text", task_name).strip()
     task_horizon = "long" if task_category in LONG_HORIZON_CATEGORIES else "short"
-    planner_task_text = (
-        f"[task_name: {task_name}]\n"
-        f"[task_category: {task_category}]\n"
-        f"[task_horizon: {task_horizon}]\n"
-        f"{task_text}"
-    )
+    planner_task_text = task_text
     rollout_path = str(output_dir / task_name)
 
     print(f"\n{'='*70}")
@@ -210,7 +205,6 @@ def run_single_task(
         "env_error_message": env_error_message,
         "fsm_result": agent._executor.result if agent._executor else None,
         "fsm_finished": agent._executor.finished if agent._executor else None,
-        "vlm_calls": agent.vlm_checker.call_count,
         "elapsed_seconds": round(elapsed, 2),
     }
 
@@ -318,7 +312,7 @@ def run_benchmark(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run MCU benchmark tasks with the Scripted Policy Agent",
+        description="Run MCU benchmark tasks with the Minecraft Purple Agent",
     )
 
     parser.add_argument(
@@ -340,12 +334,6 @@ def main():
     parser.add_argument("--planner-url", type=str, default="https://api.openai.com/v1")
     parser.add_argument("--planner-model", type=str, default="gpt-4o")
     parser.add_argument("--planner-temperature", type=float, default=0.2)
-
-    # VLM State Checker
-    parser.add_argument("--vlm-api-key", type=str, default="EMPTY")
-    parser.add_argument("--vlm-url", type=str, default="https://api.openai.com/v1")
-    parser.add_argument("--vlm-model", type=str, default="gpt-4o-mini")
-    parser.add_argument("--vlm-temperature", type=float, default=0.1)
 
     # JarvisVLA instruction runner (required)
     parser.add_argument("--vla-checkpoint-path", type=str, required=True)
@@ -376,19 +364,13 @@ def main():
         print()
         return
 
-    from src.agent.agent import ScriptedPolicyAgent
+    from src.agent.agent import MinecraftPurpleAgent
 
     planner_cfg = {
         "api_key": args.planner_api_key,
         "base_url": args.planner_url,
         "model": args.planner_model,
         "temperature": args.planner_temperature,
-    }
-    vlm_cfg = {
-        "api_key": args.vlm_api_key,
-        "base_url": args.vlm_url,
-        "model": args.vlm_model,
-        "temperature": args.vlm_temperature,
     }
     vla_cfg = {
         "enabled": True,
@@ -403,9 +385,8 @@ def main():
         "convert_camera_21_to_11": not args.vla_no_camera_convert,
     }
 
-    agent = ScriptedPolicyAgent(
+    agent = MinecraftPurpleAgent(
         planner_cfg=planner_cfg,
-        vlm_cfg=vlm_cfg,
         vla_cfg=vla_cfg,
         output_dir=args.output_dir,
     )
@@ -420,7 +401,6 @@ def main():
             agent._plan = plan
             agent._executor = FSMExecutor(
                 plan=plan,
-                vlm_checker=agent.vlm_checker,
                 instruction_runner=agent._run_state_instruction,
             )
         else:
