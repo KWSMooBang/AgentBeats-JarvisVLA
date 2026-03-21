@@ -1,0 +1,40 @@
+{
+  manifest_version: "0.1.0",
+  program: {
+    image: "ghcr.io/kwsmoobang/agentbeats-jarvisvla:latest",
+    entrypoint: [
+      "/usr/bin/tini",
+      "--",
+      "/usr/local/bin/agentbeats-entrypoint.sh"
+    ],
+    env: {
+      API_KEY: "${config.api_key}",
+      URL: "${config.url}",
+      MODEL: "${config.model}",
+      PYTHONUNBUFFERED: "1",
+      PURPLE_HOST: "0.0.0.0",
+      PURPLE_PORT: "9019"
+    },
+    network: {
+      endpoints: [
+        { name: "endpoint", port: 9019 }
+      ]
+    }
+  },
+  config_schema: {
+    type: "object",
+    properties: {
+      api_key: { type: "string", secret: true },
+      url: { type: "string" },
+      model: { type: "string" }, 
+    },
+    required: ["api_key", "url", "model" ],
+    additionalProperties: false
+  },
+  provides: {
+    a2a: { kind: "a2a", endpoint: "endpoint" }
+  },
+  exports: {
+    a2a: "a2a"
+  }
+}
