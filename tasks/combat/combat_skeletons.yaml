@@ -8,11 +8,11 @@ custom_init_commands:
 - /give @p minecraft:arrow 64
 - /time set night
 - /effect give @a night_vision 99999 250 true
-- /summon minecraft:skeleton ~2 ~ ~
+- /execute at @p run summon minecraft:skeleton ^2 ^ ^3
 defaults:
 - base
 - _self_
-text: Combat skeletons with equipped weapons and armor.
+text: Defeat the nearby skeletons using weapons and protective gear.
 reward_cfg:
 - event: kill_entity
   identity: kill_skeleton

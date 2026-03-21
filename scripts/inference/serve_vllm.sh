@@ -2,9 +2,10 @@
 
 cuda_visible_devices=0
 card_num=1
-model_name_or_path="/workspace/models/JarvisVLA-Qwen2-VL-7B" #"/path/to/your/model/directory"
+model_name_or_path="./models/JarvisVLA-Qwen2-VL-7B" #"/path/to/your/model/directory"
+export CUDA_VISIBLE_DEVICES=$cuda_visible_devices 
 
-CUDA_VISIBLE_DEVICES=$cuda_visible_devices vllm serve $model_name_or_path \
+uv run vllm serve $model_name_or_path \
     --port 9020 \
     --max-model-len 8192 \
     --max-num-seqs 10 \

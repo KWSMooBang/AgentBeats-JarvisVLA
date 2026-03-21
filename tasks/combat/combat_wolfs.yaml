@@ -8,7 +8,7 @@ custom_init_commands:
 - /summon minecraft:wolf ~3 ~ ~1 {Angry:1}
 - /summon minecraft:wolf ~4 ~ ~2 {Angry:1}
 - /give @p minecraft:shield
-text: combat and fend off wolves
+text: combat and fend off nearby wolves
 thinking: '- In order to combat wolves, we need weapons, armor, and wolves nearby.
   Firstly, the Iron Armor Set provides good protection. Secondly, a Bow with Arrows
   allows for ranged attacks, which can be useful against aggressive wolves. Wolves

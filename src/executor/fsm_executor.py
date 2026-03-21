@@ -1,79 +1,62 @@
 """
 FSM Executor
 
-Runs a Policy Spec (FSM JSON) step-by-step.  Designed for the Purple Agent
+Runs a plan (FSM JSON) step-by-step.  Designed for the Purple Agent
 protocol where the executor does NOT own the env loop — it simply produces
-the next env_action each time ``step()`` is called with a new observation.
+the next agent action each time ``step()`` is called with a new observation.
 
-Key constraint: the agent only sees **observation images**.
-All state checks use the VLM.
+Key design:
+- Transitions are TIMEOUT-ONLY (step count based).
+- No VLM state checks (too many hallucinations).
+- Plans use "always" (immediate) or "timeout" (max_steps) conditions only.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Callable, Optional
 
 import numpy as np
 
-from src.primitives.micro import MicroPrimitives
-from src.primitives.perceptual import PerceptualPrimitives
-from src.executor.vlm_checker import VLMStateChecker
-from src.primitives.guards import TerminationGuards
+from src.action.converter import noop_agent_action
+from src.planner.plan_format import to_canonical_plan
 
 logger = logging.getLogger(__name__)
-
-PERCEPTUAL_NAMES = frozenset({
-    "align_to_target", "approach_target", "mine_target_block",
-    "attack_target_entity", "search_and_face", "navigate_to_target",
-})
 
 
 class FSMExecutor:
     """
-    Stateful FSM interpreter that yields one env_action per ``step()`` call.
+    Stateful FSM interpreter that yields one agent action packet per ``step()`` call.
 
+    Uses TIMEOUT-ONLY transitions (no VLM checks for robustness).
+    
     Lifecycle:
-        1. Constructed with a validated policy_spec.
-        2. Each call to ``step(image)`` returns the next env_action (or None
+        1. Constructed with a validated plan.
+        2. Each call to ``step(image)`` returns the next action packet (or None
            when the FSM reaches a terminal state).
-
-    All internal queues, state counters, and perceptual generators are
-    managed automatically.
     """
 
     def __init__(
         self,
-        policy_spec: dict,
-        vlm_checker: VLMStateChecker,
+        plan: dict,
+        instruction_runner: Optional[
+            Callable[[np.ndarray, str, str, dict], Optional[dict]]
+        ] = None,
     ):
-        self.spec = policy_spec
-        self.vlm = vlm_checker
-        self.guards = TerminationGuards(vlm_checker)
+        self.plan = to_canonical_plan(plan)
+        self.instruction_runner = instruction_runner
 
-        self.micro = MicroPrimitives()
-        self.perceptual = PerceptualPrimitives(vlm_checker)
+        if self.instruction_runner is None:
+            raise ValueError("instruction_runner is required (VLA-only execution)")
 
         # FSM state tracking
-        self.current_state: str = policy_spec["initial_state"]
+        self.current_state: str = self.plan["initial_state"]
         self.state_step_count: int = 0
         self.total_step_count: int = 0
-        self.retry_counts: dict[str, int] = {}
 
-        global_cfg = policy_spec.get("global_config", {})
-        self.global_max_steps: int = global_cfg.get("max_total_steps", 600)
-        self.vlm_check_interval: int = global_cfg.get("vlm_check_interval", 20)
+        global_cfg = self.plan.get("global_config", {})
+        self.global_max_steps: int = global_cfg.get("max_total_steps", 2400)
 
-        # Action queue: pre-computed actions waiting to be emitted
-        self._action_queue: list[dict] = []
-        # Active perceptual generator (if any)
-        self._active_generator = None
-        # Index of current primitive within the state's primitive list
-        self._prim_index: int = 0
-        # Result of last perceptual primitive
-        self._last_prim_result: dict = {}
-        # Whether we already evaluated transitions for the current state
-        self._needs_transition: bool = False
         # Terminal flag
         self.finished: bool = False
         self.result: Optional[str] = None
@@ -84,8 +67,10 @@ class FSMExecutor:
 
     def step(self, image: np.ndarray) -> Optional[dict]:
         """
-        Given the latest observation image, return the next env_action.
+        Given the latest observation image, return the next action packet.
         Returns None when the FSM has reached a terminal state.
+        
+        Transitions are evaluated every step since they are timeout-based (no VLM checks).
         """
         # Use a bounded loop instead of recursion to avoid stack overflow
         # when transitions cycle back to the same state.
@@ -97,78 +82,49 @@ class FSMExecutor:
                 self._terminate("global_timeout")
                 return None
 
-            state_def = self.spec["states"][self.current_state]
+            state_def = self.plan["states"][self.current_state]
             if state_def.get("terminal"):
                 self._terminate(state_def.get("result", "unknown"))
                 return None
 
-            # 1. Drain queued actions first
-            if self._action_queue:
-                action = self._action_queue.pop(0)
-                self._tick()
-                return action
+            # VLA instruction-driven execution path (mandatory)
+            instruction = state_def.get("instruction")
+            if not isinstance(instruction, str) or not instruction.strip():
+                self._terminate("invalid_policy_no_instruction")
+                return None
 
-            # 2. Feed active perceptual generator
-            if self._active_generator is not None:
-                try:
-                    batch = self._active_generator.send(image)
-                    self._action_queue.extend(batch)
-                    return self._drain_one()
-                except StopIteration as e:
-                    self._last_prim_result = e.value or {}
-                    self._active_generator = None
-                    self._prim_index += 1
-                    continue  # re-evaluate in next iteration
+            # Evaluate timeout-based transitions every step
+            # (No VLM checks, so no need for expensive periodic evaluation)
+            prev_state = self.current_state
+            self._evaluate_transitions(image, state_def)
+            if self.current_state != prev_state:
+                continue
 
-            # 3. All primitives done → evaluate transitions
-            primitives = state_def.get("primitives", [])
-            if self._prim_index >= len(primitives):
-                self._evaluate_transitions(image, state_def)
-                continue  # re-evaluate with (possibly new) state
+            instruction_type = state_def.get("instruction_type", "auto")
+            action = self.instruction_runner(
+                image,
+                instruction.strip(),
+                instruction_type,
+                state_def,
+            )
+            if action is None:
+                action = {
+                    "__action_format__": "agent",
+                    "action": noop_agent_action(),
+                }
+            self._tick()
+            return action
 
-            # 4. Execute the next primitive
-            prim_spec = primitives[self._prim_index]
-            name = prim_spec["name"]
-            params = prim_spec.get("params", {})
-
-            if name in PERCEPTUAL_NAMES:
-                prim_fn = getattr(self.perceptual, name)
-                gen = prim_fn(image=image, **params)
-                try:
-                    batch = next(gen)
-                    self._active_generator = gen
-                    self._action_queue.extend(batch)
-                    return self._drain_one()
-                except StopIteration as e:
-                    self._last_prim_result = e.value or {}
-                    self._prim_index += 1
-                    continue
-            else:
-                prim_fn = getattr(self.micro, name, None)
-                if prim_fn is None:
-                    logger.warning("Unknown primitive '%s', skipping", name)
-                    self._prim_index += 1
-                    continue
-                actions = prim_fn(**params)
-                self._action_queue.extend(actions)
-                self._prim_index += 1
-                return self._drain_one()
-
-        logger.warning("step() guard limit reached — returning noop")
-        from src.primitives.atomic import make_env_action
+        logger.warning("step() guard limit reached — returning noop action")
         self._tick()
-        return make_env_action()
+        return {
+            "__action_format__": "agent",
+            "action": noop_agent_action(),
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _drain_one(self) -> Optional[dict]:
-        if not self._action_queue:
-            return None
-        action = self._action_queue.pop(0)
-        self._tick()
-        return action
 
     def _tick(self):
         self.total_step_count += 1
@@ -190,12 +146,15 @@ class FSMExecutor:
             )
         self.current_state = new_state
         self.state_step_count = 0
-        self._prim_index = 0
-        self._action_queue.clear()
-        self._active_generator = None
 
     def _evaluate_transitions(self, image: np.ndarray, state_def: dict):
-        """Evaluate transition conditions and move to next state."""
+        """
+        Evaluate transition conditions and move to next state.
+        
+        Only supports timeout-based transitions:
+        - "always": unconditional, immediate transition
+        - "timeout": transition when step_count reaches max_steps
+        """
         transitions = state_def.get("transitions", [])
 
         for trans in transitions:
@@ -206,44 +165,8 @@ class FSMExecutor:
                 self._transition_to(trans["next_state"])
                 return
 
-            elif ctype == "vlm_check":
-                answer = self.vlm.ask_yes_no(image, cond["query"])
-                target = trans["on_true"] if answer else trans["on_false"]
-                self._transition_to(target)
-                return
-
             elif ctype == "timeout":
-                if self.state_step_count >= cond["max_steps"]:
+                max_steps = cond.get("max_steps")
+                if max_steps is not None and self.state_step_count >= max_steps:
                     self._transition_to(trans["next_state"])
                     return
-
-            elif ctype == "retry_exhausted":
-                sname = self.current_state
-                self.retry_counts[sname] = self.retry_counts.get(sname, 0) + 1
-                max_r = state_def.get("max_retries", 3)
-                if self.retry_counts[sname] >= max_r:
-                    self._transition_to(trans["next_state"])
-                    return
-
-            elif ctype == "primitive_success":
-                success = self._last_prim_result.get("success", False)
-                target = trans["on_true"] if success else trans.get("on_false", self.current_state)
-                self._transition_to(target)
-                return
-
-            elif ctype == "inventory_has":
-                has = self.guards.check_inventory_has_via_vlm(
-                    image, cond["item"], cond.get("count", 1)
-                )
-                target = trans["on_true"] if has else trans.get("on_false", self.current_state)
-                self._transition_to(target)
-                return
-
-            elif ctype == "scene_check":
-                match = self.guards.check_scene_matches(image, cond["description"])
-                target = trans["on_true"] if match else trans.get("on_false", self.current_state)
-                self._transition_to(target)
-                return
-
-        # No transition fired → stay in current state but reset primitives
-        self._prim_index = 0
