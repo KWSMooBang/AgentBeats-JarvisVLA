@@ -48,6 +48,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set model download flag
+        id: model_flag
+        run: |
+          if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
+            echo "value=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build image for smoke validation
         uses: docker/build-push-action@v6
         with:
@@ -93,11 +102,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            DOWNLOAD_JARVIS_MODEL=0
+            DOWNLOAD_JARVIS_MODEL=${{ steps.model_flag.outputs.value }}
 
       - name: Publish summary
         if: github.event_name != 'pull_request'
         run: |
           echo "## Docker image published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "DOWNLOAD_JARVIS_MODEL=${{ steps.model_flag.outputs.value }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
