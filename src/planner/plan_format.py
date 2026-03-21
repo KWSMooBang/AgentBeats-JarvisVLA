@@ -1,4 +1,4 @@
-"""Policy spec format conversion utilities.
+"""Plan format conversion utilities.
 
 Supports two shapes:
 1) Canonical FSM format with top-level `states`.
@@ -15,24 +15,22 @@ RESERVED_TOP_LEVEL_KEYS = frozenset({
     "task",
     "description",
     "global_config",
-    "initial_state",
     "states",
     "steps",
 })
 
 DEFAULT_GLOBAL_CONFIG = {
-    "max_total_steps": 600,
-    "vlm_check_interval": 30,
+    "max_total_steps": 2400,
     "on_global_timeout": "abort",
 }
 
 
-def _extract_steps_dict(spec: dict[str, Any]) -> Optional[dict[str, Any]]:
-    if isinstance(spec.get("steps"), dict):
-        return spec["steps"]
+def _extract_steps_dict(plan: dict[str, Any]) -> Optional[dict[str, Any]]:
+    if isinstance(plan.get("steps"), dict):
+        return plan["steps"]
 
     step_items: dict[str, Any] = {}
-    for key, value in spec.items():
+    for key, value in plan.items():
         if key in RESERVED_TOP_LEVEL_KEYS:
             continue
         if isinstance(value, dict):
@@ -57,13 +55,56 @@ def _normalize_transition(transition: dict[str, Any], state_name: str) -> dict[s
         trans["next_state"] = cond.pop("next")
 
     ctype = cond.get("type")
-    if ctype in {"always", "timeout", "retry_exhausted"}:
+    if ctype in {"always", "timeout"}:
         trans.setdefault("next_state", state_name)
-    elif ctype in {"vlm_check", "inventory_has", "scene_check"}:
-        trans.setdefault("on_true", state_name)
-        trans.setdefault("on_false", state_name)
 
     return trans
+
+
+def _auto_link_linear_steps(states: dict[str, Any]) -> None:
+    """Auto-link sequential step1, step2, ... states for linear execution.
+    
+    When LLM generates step1, step2, ... link them linearly:
+    step1 → step2 → step3 → ... → fallback
+    
+    This overrides any fallback-only transitions to create proper linear flow.
+    """
+    step_names: list[str] = []
+    for name in sorted(states.keys()):
+        if name.startswith("step") and name[4:].isdigit():
+            step_names.append(name)
+    
+    if len(step_names) < 2:
+        return
+    
+    for i, step_name in enumerate(step_names):
+        state_def = states[step_name]
+        if state_def.get("terminal"):
+            continue
+        
+        transitions = state_def.get("transitions", [])
+        if not transitions:
+            transitions = []
+            state_def["transitions"] = transitions
+        
+        # Determine next state: next step or fallback
+        next_step = step_names[i + 1] if i + 1 < len(step_names) else "fallback"
+        
+        # Update or add timeout transition
+        has_timeout_trans = False
+        for trans in transitions:
+            cond = trans.get("condition", {})
+            if isinstance(cond, dict) and cond.get("type") == "timeout":
+                has_timeout_trans = True
+                # Override next_state to create linear flow
+                trans["next_state"] = next_step
+        
+        # If no timeout transition, add one linking to next step.
+        if not has_timeout_trans:
+            transitions.append({
+                "condition": {"type": "timeout", "max_steps": 600},
+                "next_state": next_step,
+            })
 
 
 def _step_to_state(step_name: str, step_def: dict[str, Any]) -> dict[str, Any]:
@@ -87,7 +128,7 @@ def _step_to_state(step_name: str, step_def: dict[str, Any]) -> dict[str, Any]:
         state["transitions"] = [_normalize_transition(t, step_name) for t in transitions if isinstance(t, dict)]
     elif isinstance(step_def.get("condition"), dict):
         trans = {"condition": copy.deepcopy(step_def["condition"])}
-        for key in ("next_state", "next", "on_true", "on_false"):
+        for key in ("next_state", "next"):
             if key in step_def:
                 trans[key] = step_def[key]
         state["transitions"] = [_normalize_transition(trans, step_name)]
@@ -102,16 +143,13 @@ def _step_to_state(step_name: str, step_def: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-def to_canonical_spec(spec: dict[str, Any], task_text: str = "") -> dict[str, Any]:
-    if not isinstance(spec, dict):
+def to_canonical_plan(plan: dict[str, Any], task_text: str = "") -> dict[str, Any]:
+    if not isinstance(plan, dict):
         return {}
 
-    if isinstance(spec.get("states"), dict):
-        return spec
-
-    steps = _extract_steps_dict(spec)
+    steps = _extract_steps_dict(plan)
     if steps is None:
-        return spec
+        return plan
 
     states: dict[str, Any] = {}
     for step_name, step_def in steps.items():
@@ -119,39 +157,29 @@ def to_canonical_spec(spec: dict[str, Any], task_text: str = "") -> dict[str, An
             continue
         states[step_name] = _step_to_state(step_name, step_def)
 
-    if "success" not in states:
-        states["success"] = {
-            "terminal": True,
-            "description": "Task completed",
-            "result": "success",
-        }
-    if "abort" not in states:
-        states["abort"] = {
-            "terminal": True,
-            "description": "Task failed",
-            "result": "failure",
-        }
+    # Auto-link step1, step2, ... in linear sequence if present.
+    _auto_link_linear_steps(states)
 
-    initial_state = spec.get("initial_state")
+    initial_state = plan.get("initial_state")
     if not isinstance(initial_state, str) or initial_state not in states:
         for sname, sdef in states.items():
             if not sdef.get("terminal"):
                 initial_state = sname
                 break
     if not initial_state:
-        initial_state = "success"
+        initial_state = next(iter(states.keys()), "fallback")
 
     return {
-        "task": spec.get("task") or (task_text.strip() or "task"),
-        "description": spec.get("description") or task_text.strip(),
-        "global_config": copy.deepcopy(spec.get("global_config") or DEFAULT_GLOBAL_CONFIG),
+        "task": task_text.strip() or plan.get("task") or "task",
+        "description": plan.get("description") or task_text.strip(),
+        "global_config": copy.deepcopy(plan.get("global_config") or DEFAULT_GLOBAL_CONFIG),
         "states": states,
         "initial_state": initial_state,
     }
 
 
-def canonical_to_simplified(spec: dict[str, Any]) -> dict[str, Any]:
-    canonical = to_canonical_spec(spec)
+def canonical_to_simplified_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    canonical = to_canonical_plan(plan)
     states = canonical.get("states", {})
 
     simplified: dict[str, Any] = {
@@ -160,8 +188,6 @@ def canonical_to_simplified(spec: dict[str, Any]) -> dict[str, Any]:
 
     for state_name, state_def in states.items():
         if state_def.get("terminal"):
-            # Keep terminal states internal to canonical runtime format.
-            # The planner-facing simplified spec should contain only actionable steps.
             continue
 
         step: dict[str, Any] = {
@@ -181,10 +207,6 @@ def canonical_to_simplified(spec: dict[str, Any]) -> dict[str, Any]:
                 cond = trans.get("condition", {}) if isinstance(trans.get("condition"), dict) else {"type": "always"}
                 if "next_state" in trans:
                     cond["next"] = trans["next_state"]
-                if "on_true" in trans:
-                    cond["on_true"] = trans["on_true"]
-                if "on_false" in trans:
-                    cond["on_false"] = trans["on_false"]
                 step["condition"] = cond
             else:
                 step["condition"] = {"type": "always", "next": state_name}
@@ -197,10 +219,6 @@ def canonical_to_simplified(spec: dict[str, Any]) -> dict[str, Any]:
                 cond = t.get("condition", {}) if isinstance(t.get("condition"), dict) else {"type": "always"}
                 if "next_state" in t:
                     cond["next"] = t["next_state"]
-                if "on_true" in t:
-                    cond["on_true"] = t["on_true"]
-                if "on_false" in t:
-                    cond["on_false"] = t["on_false"]
                 packed.append(cond)
             step["conditions"] = packed
 

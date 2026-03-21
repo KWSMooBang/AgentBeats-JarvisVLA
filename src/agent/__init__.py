@@ -1,1 +1,1 @@
-from src.agent.agent import ScriptedPolicyAgent, AgentState
+from src.agent.agent import MinecraftPurpleAgent, AgentState

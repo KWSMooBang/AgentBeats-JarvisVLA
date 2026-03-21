@@ -33,12 +33,12 @@ from src.planner.instruction_registry import (
     canonicalize_strict_instruction_key,
     get_strict_instruction_keys,
 )
-from src.planner.spec_format import canonical_to_simplified, to_canonical_spec
+from src.planner.plan_format import canonical_to_simplified_plan, to_canonical_plan
 from src.planner.validator import PlanValidator
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FALLBACK_MAX_STEPS = 180
+DEFAULT_FALLBACK_MAX_STEPS = 600
 
 
 def _extract_task_tokens(task_text: str) -> list[str]:
@@ -79,6 +79,51 @@ def _contains_any(text: str, words: tuple[str, ...]) -> bool:
     return any(w in lower for w in words)
 
 
+def _singularize_token(token: str) -> str:
+    token = (token or "").strip().lower()
+    if not token:
+        return token
+
+    # Common irregular plural in Minecraft entities.
+    if token == "endermen":
+        return "enderman"
+
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("es") and len(token) > 4:
+        return token[:-2]
+    if token.endswith("s") and len(token) > 3:
+        return token[:-1]
+    return token
+
+
+def _token_variants(token: str) -> list[str]:
+    """Generate robust variants for malformed short-directive targets."""
+    base = (token or "").strip().lower().replace(" ", "_")
+    if not base:
+        return []
+
+    variants: list[str] = [base]
+
+    # Extract likely object suffixes from labels like combat_skeletons, task_enderman.
+    parts = [p for p in base.split("_") if p]
+    if len(parts) >= 1:
+        variants.append(parts[-1])
+    if len(parts) >= 2:
+        variants.append("_".join(parts[-2:]))
+
+    # Add singular forms for each variant.
+    variants.extend(_singularize_token(v) for v in list(variants))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for v in variants:
+        if v and v not in seen:
+            seen.add(v)
+            deduped.append(v)
+    return deduped
+
+
 def _guess_strict_instruction_from_task(task_text: str, strict_keys: set[str]) -> Optional[str]:
     tokens = _extract_task_tokens(task_text)
     if not tokens:
@@ -97,19 +142,20 @@ def _guess_strict_instruction_from_task(task_text: str, strict_keys: set[str]) -
         prefix_order = ["kill_entity", "mine_block", "craft_item", "pickup", "use_item", "drop"]
 
     for token in tokens:
-        if len(token) < 3:
-            continue
+        for variant in _token_variants(token):
+            if len(variant) < 3:
+                continue
+            for prefix in prefix_order:
+                candidate = f"{prefix}:{variant}"
+                if candidate in strict_keys:
+                    return candidate
+
+    # Try last token variants first as object candidates.
+    for variant in _token_variants(tokens[-1]):
         for prefix in prefix_order:
-            candidate = f"{prefix}:{token}"
+            candidate = f"{prefix}:{variant}"
             if candidate in strict_keys:
                 return candidate
-
-    # Try last token first as object candidate (e.g., combat_enderman -> enderman).
-    last = tokens[-1]
-    for prefix in prefix_order:
-        candidate = f"{prefix}:{last}"
-        if candidate in strict_keys:
-            return candidate
 
     return None
 
@@ -132,18 +178,20 @@ def _repair_instruction_candidate(
         _, suffix = lowered.split(":", 1)
         suffix = suffix.strip().replace(" ", "_")
         if suffix:
-            if _contains_any(task_text, ("combat", "kill", "defeat", "hunt")):
-                candidate = f"kill_entity:{suffix}"
-                if candidate in strict_keys:
-                    return candidate
-            if _contains_any(task_text, ("craft", "make", "recipe")):
-                candidate = f"craft_item:{suffix}"
-                if candidate in strict_keys:
-                    return candidate
-            if _contains_any(task_text, ("mine", "collect", "gather")):
-                candidate = f"mine_block:{suffix}"
-                if candidate in strict_keys:
-                    return candidate
+            suffix_variants = _token_variants(suffix)
+            for normalized_suffix in suffix_variants:
+                if _contains_any(task_text, ("combat", "kill", "defeat", "hunt")):
+                    candidate = f"kill_entity:{normalized_suffix}"
+                    if candidate in strict_keys:
+                        return candidate
+                if _contains_any(task_text, ("craft", "make", "recipe")):
+                    candidate = f"craft_item:{normalized_suffix}"
+                    if candidate in strict_keys:
+                        return candidate
+                if _contains_any(task_text, ("mine", "collect", "gather")):
+                    candidate = f"mine_block:{normalized_suffix}"
+                    if candidate in strict_keys:
+                        return candidate
 
     return _guess_strict_instruction_from_task(task_text, strict_keys)
 
@@ -155,66 +203,6 @@ def _iter_transition_targets(trans: dict) -> list[str]:
         if isinstance(target, str):
             targets.append(target)
     return targets
-
-
-def _choose_retry_fallback_state(
-    state_name: str,
-    transitions: list[dict],
-    states: dict,
-) -> Optional[str]:
-    # Prefer explicit non-abort forward targets from non-retry transitions.
-    for trans in transitions:
-        cond = trans.get("condition", {})
-        if cond.get("type") == "retry_exhausted":
-            continue
-        for target in _iter_transition_targets(trans):
-            if target in states and target not in {"abort", state_name}:
-                return target
-
-    # Fallback: pick another non-terminal state in declared order.
-    for candidate, cdef in states.items():
-        if candidate in {state_name, "abort"}:
-            continue
-        if isinstance(cdef, dict) and not cdef.get("terminal"):
-            return candidate
-
-    # Last resort: success terminal if present.
-    if "success" in states and state_name != "success":
-        return "success"
-    return None
-
-
-def normalize_retry_exhausted_transitions(spec: dict) -> dict:
-    """Rewrite retry_exhausted -> abort to a non-abort fallback when possible."""
-    states = spec.get("states")
-    if not isinstance(states, dict):
-        return spec
-
-    for state_name, state_def in states.items():
-        if not isinstance(state_def, dict) or state_def.get("terminal"):
-            continue
-
-        transitions = state_def.get("transitions")
-        if not isinstance(transitions, list):
-            continue
-
-        fallback = _choose_retry_fallback_state(state_name, transitions, states)
-        if not fallback:
-            continue
-
-        for trans in transitions:
-            cond = trans.get("condition", {})
-            if cond.get("type") != "retry_exhausted":
-                continue
-            if trans.get("next_state") == "abort":
-                trans["next_state"] = fallback
-                logger.info(
-                    "Rewrote retry_exhausted target in state '%s': abort -> %s",
-                    state_name,
-                    fallback,
-                )
-
-    return spec
 
 
 def _pick_fallback_source_state(states: dict) -> Optional[str]:
@@ -230,15 +218,21 @@ def _pick_fallback_source_state(states: dict) -> Optional[str]:
     return None
 
 
-def ensure_timeout_fallback(spec: dict, task_text: str) -> dict:
-    """Ensure fallback exists and stalled states route to fallback by timeout."""
-    states = spec.get("states")
+def ensure_timeout_fallback(plan: dict, task_text: str) -> dict:
+    """
+    Ensure fallback exists and each non-fallback state has a timeout transition.
+    
+    Safety measure: Since LLM now generates timeout-only conditions,
+    this function adds fallback state and appends a timeout → fallback transition
+    only when a state has no timeout transition at all.
+    """
+    states = plan.get("states")
     if not isinstance(states, dict):
-        return spec
+        return plan
 
     source_state_name = _pick_fallback_source_state(states)
     if not source_state_name:
-        return spec
+        return plan
 
     fallback_state = states.get("fallback")
     if not isinstance(fallback_state, dict) or fallback_state.get("terminal"):
@@ -249,11 +243,11 @@ def ensure_timeout_fallback(spec: dict, task_text: str) -> dict:
             "transitions": [
                 {
                     "condition": {"type": "always"},
-                    "next_state": source_state_name,
+                    "next_state": "fallback",
                 }
             ],
         }
-        logger.info("Injected fallback state with task_text -> %s", source_state_name)
+        logger.info("Injected fallback state with self-loop transition")
     else:
         fallback_state["description"] = fallback_state.get("description", "fallback")
         fallback_state["instruction"] = task_text
@@ -263,9 +257,16 @@ def ensure_timeout_fallback(spec: dict, task_text: str) -> dict:
             fallback_state["transitions"] = [
                 {
                     "condition": {"type": "always"},
-                    "next_state": source_state_name,
+                    "next_state": "fallback",
                 }
             ]
+        else:
+            for trans in transitions:
+                if not isinstance(trans, dict):
+                    continue
+                cond = trans.get("condition", {})
+                if isinstance(cond, dict) and cond.get("type") == "always":
+                    trans["next_state"] = "fallback"
 
     for state_name, state_def in states.items():
         if not isinstance(state_def, dict) or state_def.get("terminal"):
@@ -284,7 +285,6 @@ def ensure_timeout_fallback(spec: dict, task_text: str) -> dict:
             cond = trans.get("condition", {})
             if isinstance(cond, dict) and cond.get("type") == "timeout":
                 has_timeout = True
-                trans["next_state"] = "fallback"
 
         if not has_timeout:
             transitions.append(
@@ -299,14 +299,14 @@ def ensure_timeout_fallback(spec: dict, task_text: str) -> dict:
 
         state_def["transitions"] = transitions
 
-    return spec
+    return plan
 
 
-def normalize_instruction_keys(spec: dict) -> dict:
+def normalize_instruction_keys(plan: dict) -> dict:
     """Canonicalize instructions to exact instructions.json keys for non-fallback states."""
-    states = spec.get("states")
+    states = plan.get("states")
     if not isinstance(states, dict):
-        return spec
+        return plan
 
     for state_name, state_def in states.items():
         if not isinstance(state_def, dict) or state_def.get("terminal"):
@@ -328,11 +328,11 @@ def normalize_instruction_keys(spec: dict) -> dict:
             )
             state_def["instruction"] = canonical
 
-    return spec
+    return plan
 
 
-def validate_long_horizon_constraints(spec: dict) -> list[str]:
-    states = spec.get("states")
+def validate_long_horizon_constraints(plan: dict) -> list[str]:
+    states = plan.get("states")
     if not isinstance(states, dict):
         return []
 
@@ -477,13 +477,11 @@ class LLMPlanner:
 
             logger.warning("Short directive attempt %d errors: %s", attempt + 1, errors)
 
-        fallback_instruction = self._default_short_instruction(task_text)
         logger.error(
-            "Short directive generation failed after retries; fallback instruction=%s",
-            fallback_instruction,
+            "Short directive generation failed after retries; using task_text as fallback"
         )
         return {
-            "instruction": fallback_instruction,
+            "instruction": task_text,
             "instruction_type": "normal",
         }
 
@@ -509,21 +507,21 @@ class LLMPlanner:
                 )
                 continue
 
-            canonical_spec = to_canonical_spec(parsed, task_text=task_text)
-            canonical_spec = normalize_instruction_keys(canonical_spec)
-            canonical_spec = normalize_retry_exhausted_transitions(canonical_spec)
-            canonical_spec = ensure_timeout_fallback(canonical_spec, task_text=task_text)
+            canonical_plan = to_canonical_plan(parsed, task_text=task_text)
+            canonical_plan["task"] = task_text
+            canonical_plan = normalize_instruction_keys(canonical_plan)
+            canonical_plan = ensure_timeout_fallback(canonical_plan, task_text=task_text)
 
-            errors = self.validator.validate(canonical_spec)
+            errors = self.validator.validate(canonical_plan)
             real_errors = [e for e in errors if not e.startswith("Warning")]
-            real_errors.extend(validate_long_horizon_constraints(canonical_spec))
+            real_errors.extend(validate_long_horizon_constraints(canonical_plan))
 
             if not real_errors:
                 if errors:
                     for warning in errors:
                         logger.warning("Validation warning: %s", warning)
                 logger.info("Long-horizon plan generated successfully (attempt %d)", attempt + 1)
-                return canonical_to_simplified(canonical_spec)
+                return canonical_to_simplified_plan(canonical_plan)
 
             logger.warning("Long plan attempt %d errors: %s", attempt + 1, real_errors)
             user_prompt = (
@@ -532,8 +530,8 @@ class LLMPlanner:
             )
 
         logger.error("All long-plan attempts failed; returning last plan as-is")
-        if "canonical_spec" in locals():
-            return canonical_to_simplified(canonical_spec)
+        if "canonical_plan" in locals():
+            return canonical_to_simplified_plan(canonical_plan)
         return parsed if "parsed" in locals() and parsed is not None else {}
 
     # ------------------------------------------------------------------
@@ -548,13 +546,7 @@ class LLMPlanner:
         if isinstance(guessed, str):
             return guessed
 
-        if "kill_entity:zombie" in strict_keys:
-            return "kill_entity:zombie"
-
-        keys = sorted(strict_keys)
-        if keys:
-            return keys[0]
-        return "kill_entity:zombie"
+        return task_text.strip()
 
     def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
         try:

@@ -2,12 +2,11 @@
 Purple Agent A2A Server
 
 HTTP server implementing the A2A (Agent-to-Agent) protocol.
-Launches the ScriptedPolicyAgent as a Purple Agent service.
+Launches the MinecraftPurpleAgent as a Purple Agent service.
 
 Usage:
     python -m src.server.app --port 9019 \\
-        --planner-model gpt-4o --planner-url https://api.openai.com/v1 \\
-        --vlm-model gpt-4o-mini --vlm-url http://localhost:11000/v1
+        --planner-model gpt-4o --planner-url https://api.openai.com/v1
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ def _build_agent_card(host: str, port: int, url_override: Optional[str] = None) 
     return {
         "name": "Minecraft Scripted Policy Agent",
         "description": (
-            "LLM Planner + FSM Executor + VLM State Checker. "
+            "LLM Planner + FSM Executor + VLA instruction runner. "
             "Purple Agent for Minecraft tasks via scripted policy architecture."
         ),
         "url": url_override or f"http://{host}:{port}/",
@@ -123,12 +122,6 @@ def main():
     parser.add_argument("--planner-model", type=str, default="gpt-4o")
     parser.add_argument("--planner-temperature", type=float, default=0.2)
 
-    # VLM State Checker config
-    parser.add_argument("--vlm-api-key", type=str, default="EMPTY")
-    parser.add_argument("--vlm-url", type=str, default="http://localhost:11000/v1")
-    parser.add_argument("--vlm-model", type=str, default="gpt-4o-mini")
-    parser.add_argument("--vlm-temperature", type=float, default=0.1)
-
     # JarvisVLA instruction runner (required)
     parser.add_argument("--vla-enabled", action="store_true")
     parser.add_argument("--vla-checkpoint-path", type=str, default="")
@@ -151,12 +144,6 @@ def main():
         "model": args.planner_model,
         "temperature": args.planner_temperature,
     }
-    vlm_cfg = {
-        "api_key": args.vlm_api_key,
-        "base_url": args.vlm_url,
-        "model": args.vlm_model,
-        "temperature": args.vlm_temperature,
-    }
     vla_cfg = {
         # VLA path is mandatory for this agent.
         "enabled": True,
@@ -178,7 +165,6 @@ def main():
     executor = PurpleExecutor(
         sessions=sessions,
         planner_cfg=planner_cfg,
-        vlm_cfg=vlm_cfg,
         vla_cfg=vla_cfg,
         device=args.device,
     )

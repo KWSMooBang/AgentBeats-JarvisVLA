@@ -1,7 +1,7 @@
 """
 A2A Executor
 
-Bridges the A2A request/response cycle with the ScriptedPolicyAgent.
+Bridges the A2A request/response cycle with the MinecraftPurpleAgent.
 
 Message flow:
   init  → reset agent, return ack
@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 from PIL import Image
 
-from src.agent.agent import ScriptedPolicyAgent, AgentState
+from src.agent.agent import MinecraftPurpleAgent, AgentState
 from src.action.converter import noop_agent_action
 from src.protocol.models import (
     InitPayload, ObservationPayload, ActionPayload, AckPayload,
@@ -38,7 +38,7 @@ def _decode_image(b64: str) -> np.ndarray:
 
 class PurpleExecutor:
     """
-    A2A-compatible executor for the Scripted Policy Agent.
+    A2A-compatible executor for the Minecraft Purple Agent.
 
     Designed for ``a2a`` library integration but also works standalone
     via the ``handle_message()`` method.
@@ -48,14 +48,12 @@ class PurpleExecutor:
         self,
         sessions: SessionManager,
         planner_cfg: Optional[dict] = None,
-        vlm_cfg: Optional[dict] = None,
         vla_cfg: Optional[dict] = None,
         device: str = "cuda",
     ):
         self.sessions = sessions
-        self.agent = ScriptedPolicyAgent(
+        self.agent = MinecraftPurpleAgent(
             planner_cfg=planner_cfg or {},
-            vlm_cfg=vlm_cfg or {},
             vla_cfg=vla_cfg or {},
             device=device,
         )

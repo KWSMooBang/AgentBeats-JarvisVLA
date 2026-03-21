@@ -17,13 +17,12 @@ from src.planner.instruction_registry import (
     is_strict_instruction_key,
     instructions_registry_available,
 )
-from src.planner.spec_format import to_canonical_spec
+from src.planner.plan_format import to_canonical_plan
 
 logger = logging.getLogger(__name__)
 
 KNOWN_CONDITIONS = frozenset({
-    "always", "vlm_check", "inventory_has", "timeout",
-    "retry_exhausted", "scene_check",
+    "always", "timeout",
 })
 
 KNOWN_INSTRUCTION_TYPES = frozenset({"auto", "simple", "normal", "recipe"})
@@ -32,10 +31,10 @@ KNOWN_INSTRUCTION_TYPES = frozenset({"auto", "simple", "normal", "recipe"})
 class PlanValidator:
     """Validates a plan dict and returns a list of error strings."""
 
-    def validate(self, spec: dict[str, Any]) -> list[str]:
+    def validate(self, plan: dict[str, Any]) -> list[str]:
         errors: list[str] = []
 
-        spec = to_canonical_spec(spec)
+        plan = to_canonical_plan(plan)
 
         registry_ok = instructions_registry_available()
         instruction_keys = get_instruction_keys() if registry_ok else set()
@@ -43,26 +42,23 @@ class PlanValidator:
             errors.append("instructions.json registry is unavailable; cannot validate instruction keys")
 
         for field in ("task", "states", "initial_state", "global_config"):
-            if field not in spec:
+            if field not in plan:
                 errors.append(f"Missing required top-level field: '{field}'")
         if errors:
             return errors
 
-        states: dict = spec["states"]
+        states: dict = plan["states"]
 
-        if spec["initial_state"] not in states:
+        if plan["initial_state"] not in states:
             errors.append(
-                f"initial_state '{spec['initial_state']}' not found in states"
+                f"initial_state '{plan['initial_state']}' not found in states"
             )
 
         reachable: set[str] = set()
-        self._find_reachable(spec["initial_state"], states, reachable)
-
-        has_terminal = False
+        self._find_reachable(plan["initial_state"], states, reachable)
 
         for name, sdef in states.items():
             if sdef.get("terminal"):
-                has_terminal = True
                 if "result" not in sdef:
                     errors.append(f"Terminal state '{name}' missing 'result'")
                 continue
@@ -127,12 +123,12 @@ class PlanValidator:
                             f"(from state '{name}')"
                         )
 
-        if not has_terminal:
-            errors.append("No terminal state found in spec")
-
         unreachable = set(states.keys()) - reachable
+        # Exclude auto-generated terminal states from unreachability warnings
+        auto_terminal_states = {"success", "abort"}
         for u in unreachable:
-            errors.append(f"Warning: state '{u}' unreachable from initial_state")
+            if u not in auto_terminal_states:
+                errors.append(f"Warning: state '{u}' unreachable from initial_state")
 
         return errors
 

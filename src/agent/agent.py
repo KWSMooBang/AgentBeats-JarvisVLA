@@ -30,7 +30,6 @@ import numpy as np
 from src.planner.llm_planner import LLMPlanner
 from src.planner.validator import PlanValidator
 from src.executor.fsm_executor import FSMExecutor
-from src.executor.vlm_checker import VLMStateChecker
 from src.action.converter import noop_agent_action
 
 logger = logging.getLogger(__name__)
@@ -51,7 +50,7 @@ class AgentState:
     direct_instruction_type: str = "normal"
 
 
-class ScriptedPolicyAgent:
+class MinecraftPurpleAgent:
     """
     Purple-Agent-compatible scripted policy agent.
 
@@ -59,8 +58,6 @@ class ScriptedPolicyAgent:
     ----------
     planner_cfg : dict
         Kwargs for LLMPlanner (api_key, base_url, model, …).
-    vlm_cfg : dict
-        Kwargs for VLMStateChecker (api_key, base_url, model, …).
     vla_cfg : dict
         JarvisVLA runner config. State-level ``instruction`` fields
         are executed by the JarvisVLA model.
@@ -71,20 +68,17 @@ class ScriptedPolicyAgent:
     def __init__(
         self,
         planner_cfg: Optional[dict] = None,
-        vlm_cfg: Optional[dict] = None,
         vla_cfg: Optional[dict] = None,
         device: str = "cuda",
         output_dir: str = "./outputs",
     ):
         planner_cfg = planner_cfg or {}
-        vlm_cfg = vlm_cfg or {}
         vla_cfg = vla_cfg or {}
 
         self._device_str = device
         self._output_dir = Path(output_dir)
 
         self.planner = LLMPlanner(**planner_cfg)
-        self.vlm_checker = VLMStateChecker(**vlm_cfg)
         self.validator = PlanValidator()
         self.instruction_runner = self._build_instruction_runner(vla_cfg)
 
@@ -98,7 +92,7 @@ class ScriptedPolicyAgent:
         self._direct_step_count: int = 0
         self._task_text: Optional[str] = None
 
-        logger.info("ScriptedPolicyAgent initialized")
+        logger.info("MinecraftPurpleAgent initialized")
 
     @property
     def device(self):
@@ -180,7 +174,6 @@ class ScriptedPolicyAgent:
 
             self._executor = FSMExecutor(
                 plan=self._plan,
-                vlm_checker=self.vlm_checker,
                 instruction_runner=self._run_state_instruction,
             )
 
@@ -377,7 +370,6 @@ class ScriptedPolicyAgent:
                 "result": self._executor.result,
                 "total_steps": self._executor.total_step_count,
                 "final_state": self._executor.current_state,
-                "vlm_calls": self.vlm_checker.call_count,
                 "elapsed_seconds": elapsed,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -391,7 +383,6 @@ class ScriptedPolicyAgent:
                 "final_state": "short_direct",
                 "direct_instruction": self._short_instruction,
                 "direct_instruction_type": self._short_instruction_type,
-                "vlm_calls": self.vlm_checker.call_count,
                 "elapsed_seconds": elapsed,
                 "timestamp": datetime.now().isoformat(),
             }

@@ -10,29 +10,26 @@ The planner supports three LLM calls:
 from __future__ import annotations
 
 
-LONG_HORIZON_CATEGORIES = frozenset({"ender_dragon", "mine_diamond_from_scratch"})
-
-
 def classify_task_horizon(task_text: str) -> str:
-    """Heuristic fallback when horizon-classification LLM output is invalid."""
+    """
+    Heuristic fallback when horizon-classification LLM output is invalid.
+    """
     text = (task_text or "").lower()
 
-    if "[task_horizon: long]" in text:
-        return "long"
-    if "[task_horizon: short]" in text:
-        return "short"
-
-    for cat in LONG_HORIZON_CATEGORIES:
-        if f"[task_category: {cat}]" in text:
+    # Multi-step indicators: tasks requiring preparation or full progression
+    long_indicators = [
+        "from the starting",
+        "from the start",
+        "starting from scratch",
+        "with empty inventory",
+        "starting with empty",
+        "from scratch",
+    ]
+    
+    for indicator in long_indicators:
+        if indicator in text:
             return "long"
-
-    if "ender dragon" in text or "kill_ender_dragon" in text:
-        return "long"
-    if "mine_diamond_from_scratch" in text:
-        return "long"
-    if "diamond" in text and "from scratch" in text:
-        return "long"
-
+        
     return "short"
 
 
@@ -41,7 +38,7 @@ You are a strict task horizon classifier for Minecraft tasks.
 Return ONLY JSON: {"horizon": "short"} or {"horizon": "long"}.
 
 Use "long" only when the task clearly needs multi-stage long-horizon planning
-(e.g., kill_ender_dragon, mine_diamond_from_scratch).
+that start from scratch or initial empty inventory.
 Otherwise return "short".
 """
 
@@ -82,21 +79,48 @@ PLANNER_SYSTEM_PROMPT = """\
 You are a Minecraft task planner. Given a task description you MUST output
 an actionable long-horizon Plan JSON with staged step decomposition.
 
-IMPORTANT: The agent can only see observation images and has NO access
-to inventory data, health, or any game info. All state checks must be done
-via VLM visual queries (vlm_check) or step counting (timeout).
+IMPORTANT: The agent uses ONLY visual instruction execution (VLA) and step
+counting for state transitions. All transitions are TIMEOUT-ONLY.
 
-## Transition Conditions
-| type            | extra fields                 | description                           |
-|-----------------|------------------------------|---------------------------------------|
-| always          | -                            | Unconditional transition              |
-| vlm_check       | query: str                   | VLM yes/no visual question            |
-| inventory_has   | item: str, count: int        | VLM-inferred inventory check (visual) |
-| timeout         | max_steps: int               | Steps spent in this step              |
-| retry_exhausted | -                            | Exceeded step's max_retries           |
-| scene_check     | description: str             | VLM scene-matching check              |
+## Timing Reference
+- All actions run at ~20 steps per second (50ms per step)
+- Execution time = max_steps / 20
+- Examples: 600 steps = 30s, 1200 steps = 60s (1min), 1800 steps = 90s, 2400 steps = 120s (2min)
 
-## Output Format (Simplified)
+## Transition Conditions (TIMEOUT-ONLY)
+| type            | extra fields       | description                              |
+|-----------------|--------------------|------------------------------------------|
+| always          | -                  | Unconditional transition                 |
+| timeout         | max_steps: int     | After max_steps in this step → next      |
+
+CRITICAL: 
+- ALL transitions MUST use "type": "timeout" with appropriate max_steps.
+- NO VLM queries or state checks allowed.
+- Set max_steps GENEROUSLY per subgoal type (see guidelines below).
+- Each step is a single VLA instruction repeated for up to max_steps.
+
+## Max Steps Guidelines (GENEROUS Per-Subgoal Time Allocation)
+Each subgoal gets 40-120 seconds. Set appropriate max_steps based on instruction type:
+
+| Instruction Type | Typical Time | Recommended max_steps |
+|---|---|---|
+| move_to_* (navigation) | 40-60 seconds | 800-1200 |
+| mine_block:* | 50-80 seconds | 1000-1600 |
+| kill_entity:* (combat) | 60-90 seconds | 1200-1800 |
+| craft_item:* | 40-60 seconds | 800-1200 |
+| pickup:*, use_item:* | 30-40 seconds | 600-800 |
+| drop:* | 20-30 seconds | 400-600 |
+| fallback (recovery) | 60-120 seconds | 1200-2400 |
+
+IMPORTANT NOTES:
+- Each subgoal typically takes 1-2 minutes when fallback is included
+- Complex subgoals: 1200-1800 steps (60-90 seconds)
+- Moderate subgoals: 800-1200 steps (40-60 seconds)
+- Simple subgoals: 600-800 steps (30-40 seconds)
+- Fallback recovery gets plenty of time for retries
+- Total episode time budget: up to 2 minutes
+
+## Output Format (Simplified, TIMEOUT-ONLY)
 
 ```json
 {
@@ -105,7 +129,8 @@ via VLM visual queries (vlm_check) or step counting (timeout).
     "instruction": "<EXACT instructions.json key in prefix:item format>",
     "instruction_type": "<auto|simple|normal|recipe>",
     "condition": {
-      "type": "<condition_type>",
+      "type": "timeout",
+      "max_steps": 1000,
       "next": "step2"
     }
   },
@@ -114,14 +139,14 @@ via VLM visual queries (vlm_check) or step counting (timeout).
     "instruction_type": "<auto|simple|normal|recipe>",
     "condition": {
       "type": "timeout",
-      "max_steps": 180,
+      "max_steps": 1200,
       "next": "fallback"
     }
   },
   "fallback": {
     "instruction": "<RAW task_text string>",
     "instruction_type": "normal",
-    "condition": {"type": "always", "next": "step1"}
+    "condition": {"type": "always", "next": "fallback"}
   }
 }
 ```
@@ -129,15 +154,16 @@ via VLM visual queries (vlm_check) or step counting (timeout).
 ## Rules
 1. Use top-level step entries (e.g. step1, step2), not nested states.
 2. Do NOT output top-level success or abort entries.
-3. Every non-terminal step MUST include instruction, instruction_type, and condition.
-4. instruction MUST be an EXACT instructions.json root key in prefix:item format.
+3. Every non-terminal step MUST have: instruction, instruction_type, condition.
+4. instruction MUST be an EXACT instructions.json root key (prefix:item format).
 5. instruction_type MUST be one of: auto, simple, normal, recipe.
 6. Include a dedicated non-terminal fallback step.
 7. fallback.instruction MUST be the raw input task_text string.
-8. For steps that can stall, route timeout recovery to fallback.
-9. Use vlm_check sparingly - only at step boundaries.
-10. Execution is VLA-only at runtime. Use instruction + condition logic.
-11. Output ONLY the JSON, no explanation.
+8. fallback.condition MUST be {"type": "always", "next": "fallback"}.
+9. Every non-fallback step condition MUST be "type": "timeout" with max_steps.
+10. Use the max_steps guidelines above; prefer 600-1800 steps per subgoal for 1-2 minute total time.
+11. Execution is VLA-only. Step transitions happen purely on step counts.
+12. Output ONLY the JSON, no explanation.
 """
 
 
@@ -145,7 +171,9 @@ def build_planner_prompt(task_text: str) -> str:
     return (
         "Task horizon is already LONG. Build a staged long-horizon plan.\n"
         "Output Plan JSON only.\n"
-        "Ensure fallback.instruction is exactly this task_text string.\n\n"
+        "Ensure fallback.instruction is exactly this task_text string.\n"
+        "Use GENEROUS max_steps per subgoal (600-1800 steps typical, up to 2400 for fallback).\n"
+        "Total episode should take 1-2 minutes to complete.\n\n"
         f"Task: {task_text}"
     )
 

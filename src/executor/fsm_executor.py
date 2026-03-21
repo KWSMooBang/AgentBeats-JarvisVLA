@@ -5,8 +5,10 @@ Runs a plan (FSM JSON) step-by-step.  Designed for the Purple Agent
 protocol where the executor does NOT own the env loop — it simply produces
 the next agent action each time ``step()`` is called with a new observation.
 
-Key constraint: the agent only sees **observation images**.
-All state checks use the VLM.
+Key design:
+- Transitions are TIMEOUT-ONLY (step count based).
+- No VLM state checks (too many hallucinations).
+- Plans use "always" (immediate) or "timeout" (max_steps) conditions only.
 """
 
 from __future__ import annotations
@@ -16,9 +18,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from src.executor.vlm_checker import VLMStateChecker
 from src.action.converter import noop_agent_action
-from src.planner.spec_format import to_canonical_spec
+from src.planner.plan_format import to_canonical_plan
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ class FSMExecutor:
     """
     Stateful FSM interpreter that yields one agent action packet per ``step()`` call.
 
+    Uses TIMEOUT-ONLY transitions (no VLM checks for robustness).
+    
     Lifecycle:
         1. Constructed with a validated plan.
         2. Each call to ``step(image)`` returns the next action packet (or None
@@ -36,27 +39,23 @@ class FSMExecutor:
     def __init__(
         self,
         plan: dict,
-        vlm_checker: VLMStateChecker,
         instruction_runner: Optional[
             Callable[[np.ndarray, str, str, dict], Optional[dict]]
         ] = None,
     ):
-        self.spec = to_canonical_spec(plan)
-        self.vlm = vlm_checker
+        self.plan = to_canonical_plan(plan)
         self.instruction_runner = instruction_runner
 
         if self.instruction_runner is None:
             raise ValueError("instruction_runner is required (VLA-only execution)")
 
         # FSM state tracking
-        self.current_state: str = self.spec["initial_state"]
+        self.current_state: str = self.plan["initial_state"]
         self.state_step_count: int = 0
         self.total_step_count: int = 0
-        self.retry_counts: dict[str, int] = {}
 
-        global_cfg = self.spec.get("global_config", {})
-        self.global_max_steps: int = global_cfg.get("max_total_steps", 600)
-        self.vlm_check_interval: int = global_cfg.get("vlm_check_interval", 20)
+        global_cfg = self.plan.get("global_config", {})
+        self.global_max_steps: int = global_cfg.get("max_total_steps", 2400)
 
         # Terminal flag
         self.finished: bool = False
@@ -70,6 +69,8 @@ class FSMExecutor:
         """
         Given the latest observation image, return the next action packet.
         Returns None when the FSM has reached a terminal state.
+        
+        Transitions are evaluated every step since they are timeout-based (no VLM checks).
         """
         # Use a bounded loop instead of recursion to avoid stack overflow
         # when transitions cycle back to the same state.
@@ -81,7 +82,7 @@ class FSMExecutor:
                 self._terminate("global_timeout")
                 return None
 
-            state_def = self.spec["states"][self.current_state]
+            state_def = self.plan["states"][self.current_state]
             if state_def.get("terminal"):
                 self._terminate(state_def.get("result", "unknown"))
                 return None
@@ -92,11 +93,12 @@ class FSMExecutor:
                 self._terminate("invalid_policy_no_instruction")
                 return None
 
-            if self._should_eval_instruction_transition():
-                prev_state = self.current_state
-                self._evaluate_transitions(image, state_def)
-                if self.current_state != prev_state:
-                    continue
+            # Evaluate timeout-based transitions every step
+            # (No VLM checks, so no need for expensive periodic evaluation)
+            prev_state = self.current_state
+            self._evaluate_transitions(image, state_def)
+            if self.current_state != prev_state:
+                continue
 
             instruction_type = state_def.get("instruction_type", "auto")
             action = self.instruction_runner(
@@ -128,10 +130,6 @@ class FSMExecutor:
         self.total_step_count += 1
         self.state_step_count += 1
 
-    def _should_eval_instruction_transition(self) -> bool:
-        interval = max(1, int(self.vlm_check_interval))
-        return self.state_step_count > 0 and (self.state_step_count % interval == 0)
-
     def _terminate(self, result: str):
         self.finished = True
         self.result = result
@@ -150,7 +148,13 @@ class FSMExecutor:
         self.state_step_count = 0
 
     def _evaluate_transitions(self, image: np.ndarray, state_def: dict):
-        """Evaluate transition conditions and move to next state."""
+        """
+        Evaluate transition conditions and move to next state.
+        
+        Only supports timeout-based transitions:
+        - "always": unconditional, immediate transition
+        - "timeout": transition when step_count reaches max_steps
+        """
         transitions = state_def.get("transitions", [])
 
         for trans in transitions:
@@ -161,41 +165,8 @@ class FSMExecutor:
                 self._transition_to(trans["next_state"])
                 return
 
-            elif ctype == "vlm_check":
-                answer = self.vlm.ask_yes_no(image, cond["query"])
-                target = trans["on_true"] if answer else trans["on_false"]
-                self._transition_to(target)
-                return
-
             elif ctype == "timeout":
-                if self.state_step_count >= cond["max_steps"]:
+                max_steps = cond.get("max_steps")
+                if max_steps is not None and self.state_step_count >= max_steps:
                     self._transition_to(trans["next_state"])
                     return
-
-            elif ctype == "retry_exhausted":
-                sname = self.current_state
-                self.retry_counts[sname] = self.retry_counts.get(sname, 0) + 1
-                max_r = state_def.get("max_retries", 3)
-                if self.retry_counts[sname] >= max_r:
-                    self._transition_to(trans["next_state"])
-                    return
-
-            elif ctype == "inventory_has":
-                query = (
-                    f"Look at the hotbar/inventory area at the bottom of the screen. "
-                    f"Does the player have at least {cond.get('count', 1)} {cond['item']}?"
-                )
-                has = self.vlm.ask_yes_no(image, query)
-                target = trans["on_true"] if has else trans.get("on_false", self.current_state)
-                self._transition_to(target)
-                return
-
-            elif ctype == "scene_check":
-                query = (
-                    "Does this Minecraft screenshot match the following description: "
-                    f"{cond['description']}"
-                )
-                match = self.vlm.ask_yes_no(image, query)
-                target = trans["on_true"] if match else trans.get("on_false", self.current_state)
-                self._transition_to(target)
-                return
