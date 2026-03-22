@@ -14,7 +14,7 @@ fi
 
 VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
 VLLM_PORT="${VLLM_PORT:-9020}"
-VLA_MODEL_PATH="${VLA_MODEL_PATH:-/models/JarvisVLA-Qwen2-VL-7B}"
+VLA_MODEL_PATH="${VLA_MODEL_PATH:-./models/JarvisVLA-Qwen2-VL-7B}"
 VLA_BASE_URL="${VLA_BASE_URL:-http://127.0.0.1:${VLLM_PORT}/v1}"
 VLLM_SERVED_MODEL_NAME="${VLLM_SERVED_MODEL_NAME:-jarvisvla}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-8192}"
@@ -26,6 +26,53 @@ VLLM_START_TIMEOUT="${VLLM_START_TIMEOUT:-300}"
 
 PURPLE_HOST="${PURPLE_HOST:-0.0.0.0}"
 PURPLE_PORT="${PURPLE_PORT:-9019}"
+PURPLE_CARD_URL="${PURPLE_CARD_URL:-}"
+
+EXTRA_APP_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)
+      if [[ $# -lt 2 ]]; then
+        echo "[entrypoint] ERROR: --host requires a value" >&2
+        exit 1
+      fi
+      PURPLE_HOST="$2"
+      shift 2
+      ;;
+    --host=*)
+      PURPLE_HOST="${1#*=}"
+      shift
+      ;;
+    --port)
+      if [[ $# -lt 2 ]]; then
+        echo "[entrypoint] ERROR: --port requires a value" >&2
+        exit 1
+      fi
+      PURPLE_PORT="$2"
+      shift 2
+      ;;
+    --port=*)
+      PURPLE_PORT="${1#*=}"
+      shift
+      ;;
+    --card-url)
+      if [[ $# -lt 2 ]]; then
+        echo "[entrypoint] ERROR: --card-url requires a value" >&2
+        exit 1
+      fi
+      PURPLE_CARD_URL="$2"
+      shift 2
+      ;;
+    --card-url=*)
+      PURPLE_CARD_URL="${1#*=}"
+      shift
+      ;;
+    *)
+      EXTRA_APP_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
 PLANNER_API_KEY="${PLANNER_API_KEY:-${API_KEY:-EMPTY}}"
 PLANNER_URL="${PLANNER_URL:-${URL:-https://api.tokenfactory.nebius.com/v1/}}"
@@ -88,20 +135,29 @@ if [[ "${READY}" != "1" ]]; then
   exit 1
 fi
 
-echo "[entrypoint] vLLM ready, starting Purple server on ${PURPLE_HOST}:${PURPLE_PORT}"
-exec uv run python -m src.server.app \
-  --host "${PURPLE_HOST}" \
-  --port "${PURPLE_PORT}" \
-  --planner-api-key "${PLANNER_API_KEY}" \
-  --planner-url "${PLANNER_URL}" \
-  --planner-model "${PLANNER_MODEL}" \
-  --planner-temperature "${PLANNER_TEMPERATURE}" \
-  --vla-checkpoint-path "${VLA_MODEL_PATH}" \
-  --vla-url "${VLA_BASE_URL}" \
-  --vla-api-key "${VLA_API_KEY}" \
-  --vla-history-num "${VLA_HISTORY_NUM}" \
-  --vla-action-chunk-len "${VLA_ACTION_CHUNK_LEN}" \
-  --vla-bpe "${VLA_BPE}" \
-  --vla-instruction-type "${VLA_INSTRUCTION_TYPE}" \
-  --vla-temperature "${VLA_TEMPERATURE}" \
+APP_ARGS=(
+  --host "${PURPLE_HOST}"
+  --port "${PURPLE_PORT}"
+  --planner-api-key "${PLANNER_API_KEY}"
+  --planner-url "${PLANNER_URL}"
+  --planner-model "${PLANNER_MODEL}"
+  --planner-temperature "${PLANNER_TEMPERATURE}"
+  --vla-checkpoint-path "${VLA_MODEL_PATH}"
+  --vla-url "${VLA_BASE_URL}"
+  --vla-api-key "${VLA_API_KEY}"
+  --vla-history-num "${VLA_HISTORY_NUM}"
+  --vla-action-chunk-len "${VLA_ACTION_CHUNK_LEN}"
+  --vla-bpe "${VLA_BPE}"
+  --vla-instruction-type "${VLA_INSTRUCTION_TYPE}"
+  --vla-temperature "${VLA_TEMPERATURE}"
   --device "${DEVICE}"
+)
+
+if [[ -n "${PURPLE_CARD_URL}" ]]; then
+  APP_ARGS+=(--card-url "${PURPLE_CARD_URL}")
+fi
+
+APP_ARGS+=("${EXTRA_APP_ARGS[@]}")
+
+echo "[entrypoint] vLLM ready, starting Purple server on ${PURPLE_HOST}:${PURPLE_PORT}"
+exec uv run python -m src.server.app "${APP_ARGS[@]}"

@@ -1,77 +1,221 @@
-# JARVIS-VLA: Post-Training Large-Scale Vision Language Models to Play Visual Games with Keyboards and Mouse
+# JarvisVLA-based Purple Agent README
 
-[![arXiv](https://img.shields.io/badge/arXiv-2503.16365-df2a2a.svg?style=for-the-badge)](https://arxiv.org/pdf/2503.16365)
-[![HF Models](https://img.shields.io/badge/%F0%9F%A4%97-Models-yellow?style=for-the-badge)](https://huggingface.co/collections/CraftJarvis/jarvis-vla-v1-67dc157a99d011efd7d7f7e4)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2.0-EE4C2C.svg?style=for-the-badge&logo=pytorch)](https://pytorch.org/get-started/locally/)
-[![Python](https://img.shields.io/badge/python-3.10-blue?style=for-the-badge)](https://www.python.org)
-[![License](https://img.shields.io/github/license/TRI-ML/prismatic-vlms?style=for-the-badge)](LICENSE)
+This document explains the architecture and usage of the JarvisVLA-based Purple Agent implemented under src.
 
-[**Project Website**](https://craftjarvis.github.io/JarvisVLA/) | [**Datasets**](https://huggingface.co/datasets/CraftJarvis/minecraft-vla-sft) 
+## 1. Overview
 
-## Updates
+This Purple Agent follows the pipeline below.
 
-* [2025.03.21] Our paper can be found in [arXiv](https://arxiv.org/pdf/2503.16365).
+1. The Planner receives task_text and routes it to short or long horizon mode.
+2. In short mode, a single instruction is executed directly. In long mode, an FSM plan is generated and executed state by state.
+3. Each state instruction is executed by the JarvisVLA Runner to produce a one-step action.
+4. The final action is returned in the Purple Agent compact format (buttons, camera).
 
-## Installation
-Install dependencies.
-```shell
-git clone https://github.com/CraftJarvis/JarvisVLA.git
-conda create -n mcvla python=3.10
-conda activate mcvla
-cd JarvisVLA
-conda install --channel=conda-forge openjdk=8 -y
-pip install -e .
+Core constraints:
+
+- VLA-only execution path (no primitive policy path)
+- instruction must be a strict instructions.json key (prefix:item)
+- transitions are timeout/always based (no visual-state-check transitions)
+
+## 2. Source Structure (src)
+
+- src/server/app.py: A2A server entrypoint, CLI parsing, AgentCard registration
+- src/server/executor.py: handles A2A messages (init, obs) and returns actions
+- src/agent/agent.py: orchestrates Planner + FSMExecutor + JarvisVLA Runner
+- src/agent/instruction_runner.py: JarvisVLA one-step instruction runner wrapper
+- src/executor/fsm_executor.py: timeout-only FSM executor
+- src/planner/llm_planner.py: horizon classification, short directive generation, long plan generation
+- src/planner/validator.py: plan/instruction validation
+- src/planner/instruction_registry.py: instruction key normalization/validation against instructions.json
+- src/protocol/models.py: A2A payload schema (Pydantic)
+- src/action/converter.py: noop and action-format utilities
+
+## 3. Execution Architecture Details
+
+### 3.1 A2A Layer
+
+- On init:
+  - reset agent
+  - initialize per-context state
+  - return ack
+- On obs:
+  - decode base64 image
+  - call agent act()
+  - return action
+
+### 3.2 Agent Layer
+
+- reset(task_text):
+  - routes with Planner (short or long)
+  - short:
+    - stores single instruction and instruction_type, then enters direct execution mode
+  - long:
+    - generates/validates/re-generates plan if needed
+    - creates FSMExecutor
+  - creates episode directory and saves plan.json
+
+- act(obs, state):
+  - short: executes the same instruction with JarvisVLA every step
+  - long: executes current FSM-state instruction and evaluates timeout transitions
+  - on termination, returns noop and saves result.json
+
+### 3.3 Planner/Plan Rules
+
+- short horizon:
+  - JSON format: {instruction, instruction_type}
+  - instruction must be a strict key (prefix:item)
+- long horizon:
+  - generates step-based plan and converts it to canonical FSM
+  - ensures fallback state exists
+  - ensures non-fallback states have timeout transitions
+  - transition conditions are limited to always or timeout
+
+### 3.4 JarvisVLA Runner
+
+- uses jarvisvla.evaluate.agent_wrapper.VLLM_AGENT
+- executes one state instruction to produce one-step action
+- supports optional 21-bin to 11-bin camera conversion (enabled by default)
+
+## 4. Server Run Guide
+
+### 4.1 Minimal Run
+
+```bash
+cd /workspace/woosung/AgentBeats-JarvisVLA
+
+python -m src.server.app \
+  --host 0.0.0.0 \
+  --port 9019 \
+  --planner-model gpt-4o \
+  --vla-checkpoint-path /ABS/PATH/TO/JarvisVLA-Checkpoint \
+  --vla-url http://localhost:8000/v1
 ```
 
-After the installation, you can run the following command to check if the installation is successful and the environment is working:
+--vla-checkpoint-path is required.
 
-```shell
-# After the installation, you can run the following command to check if the installation is successful:
-python -m minestudio.simulator.entry # using Xvfb
-MINESTUDIO_GPU_RENDER=1 python -m minestudio.simulator.entry # using VirtualGL
-```
+### 4.2 Main CLI Arguments
 
-## Inference 
+Planner:
 
-You can serve the model with vllm to support multi-GPU and multi-process rollout.
-```sh
-CUDA_VISIBLE_DEVICES=0 vllm serve jarvis_vla_qwen2_vl_7b_sft --port 8000
-```
+- --planner-api-key
+- --planner-url (default: https://api.openai.com/v1)
+- --planner-model (default: gpt-4o)
+- --planner-temperature (default: 0.2)
 
-Then you need to edit the rollout script to the use the correct base_url and port. 
-Finally, you can run the rollout script.
-```sh
-sh scripts/evaluate/rollout-kill.sh
-```
+VLA:
 
-## Train
+- --vla-checkpoint-path (required)
+- --vla-url (default: http://localhost:8000/v1)
+- --vla-api-key
+- --vla-history-num (default: 4)
+- --vla-action-chunk-len (default: 1)
+- --vla-bpe (default: 0)
+- --vla-instruction-type (default: normal)
+- --vla-temperature (default: 0.7)
+- --vla-no-camera-convert (disables 21->11 camera conversion)
 
-Prepare the dataset and base model, and write their locations in the shell below.
+## 5. A2A Message Protocol
 
-- Single GPU
-```shell
-sh scripts/vla/vla_qwen2_vl_7b_sft.sh
-```
-- Multi-GPU
-```shell
-sh scripts/vla/vla_qwen2_vl_7b_sft-multi-GPU.sh
-```
-- Multi-Node
-```shell
-sh scripts/vla/vla_qwen2_vl_7b_sft-multi-node.sh
-```
+### 5.1 Init Request
 
----
-
-### Citation
-
-If you find our code or models useful in your work, please cite [our paper](https://arxiv.org/abs/2406.09246):
-
-```bibtex
-@article{li2025jarvisvla,
-  title   = {JARVIS-VLA: Post-Training Large-Scale Vision Language Models to Play Visual Games with Keyboards and Mouse},
-  author  = {Muyao Li and Zihao Wang and Kaichen He and Xiaojian Ma and Yitao Liang},
-  journal = {arXiv preprint arXiv:2503.16365}, 
-  year    = {2025}
+```json
+{
+  "type": "init",
+  "text": "kill_entity:enderman"
 }
 ```
+
+Response:
+
+```json
+{
+  "type": "ack",
+  "success": true,
+  "message": "Initialized"
+}
+```
+
+### 5.2 Observation Request
+
+```json
+{
+  "type": "obs",
+  "step": 1,
+  "obs": "<base64-encoded-rgb-image>"
+}
+```
+
+Response:
+
+```json
+{
+  "type": "action",
+  "action_type": "agent",
+  "buttons": [0],
+  "camera": [60]
+}
+```
+
+Even in failure cases (before init, decode failure, etc.), the server safely returns a noop action.
+
+## 6. Output Artifacts
+
+The following files are saved per episode.
+
+- plan.json: planner output plan
+- result.json: execution summary
+
+Main fields in result.json:
+
+- execution_mode: short or long
+- finished: FSM termination flag (long mode)
+- result: termination reason or current status
+- total_steps: accumulated steps
+- final_state: last state
+
+## 7. Standalone Benchmark Run
+
+To run directly in the MineStudio loop:
+
+```bash
+cd /workspace/woosung/AgentBeats-JarvisVLA
+
+python examples/run_standalone.py \
+  --category combat \
+  --tasks-dir ./tasks \
+  --output-dir ./outputs \
+  --planner-model gpt-4o \
+  --vla-checkpoint-path /ABS/PATH/TO/JarvisVLA-Checkpoint \
+  --vla-url http://localhost:9020/v1
+```
+
+If you prefer shell-script execution, see scripts/run_benchmark.sh.
+
+## 8. Troubleshooting
+
+- On startup, --vla-checkpoint-path is required:
+  - A required argument is missing. Set a valid checkpoint directory.
+
+- instruction ... is not a valid instructions.json key:
+  - The instruction is not a strict prefix:item key.
+  - Tighten planner prompts/task text or verify the instruction registry.
+
+- action keeps returning noop:
+  - obs was sent before init, or
+  - base64 image decoding failed, or
+  - JarvisVLA execution raised an exception.
+
+## 9. Operational Recommendations
+
+- For short-horizon tasks, prefer single-instruction direct execution.
+- Reserve deep long-horizon decomposition for tasks such as ender_dragon and mine_diamond_from_scratch.
+- Keep planner temperature low (for example, 0.1 to 0.2) to reduce plan variance.
+
+## 10. References
+
+- JarvisVLA (original repository): https://github.com/CraftJarvis/JarvisVLA
+- MineStudio (framework repository): https://github.com/CraftJarvis/MineStudio
+- MCU (original repository): https://github.com/CraftJarvis/MCU
+- MCU-AgentBeats (MCU benchmark task repository): https://github.com/KWSMooBang/MCU-AgentBeats
+- Minecraft-Benchmark-Agentbeats-Leaderboard: https://github.com/KWSMooBang/Minecraft-Benchmark-Agentbeats-Leaderboard
+- Minecraft-agentbeats-leaderboard (RDI Foundation): https://github.com/RDI-Foundation/Minecraft-agentbeats-leaderboard
