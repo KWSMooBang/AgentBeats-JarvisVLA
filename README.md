@@ -16,6 +16,7 @@ Core constraints:
 - VLA-only execution path (no primitive policy path)
 - instruction must be a strict instructions.json key (prefix:item)
 - transitions are timeout/always based (no visual-state-check transitions)
+- A GPU with at least 24GB VRAM is required for JarvisVLA inference.
 
 ## 2. Source Structure (src)
 
