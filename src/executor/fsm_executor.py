@@ -42,6 +42,8 @@ class FSMExecutor:
         instruction_runner: Optional[
             Callable[[np.ndarray, str, str, dict], Optional[dict]]
         ] = None,
+        vqa_checker: Optional[Callable[[np.ndarray, dict], Optional[bool]]] = None,
+        vqa_interval_steps: int = 600,
     ):
         self.plan = to_canonical_plan(plan)
         self.instruction_runner = instruction_runner
@@ -55,7 +57,11 @@ class FSMExecutor:
         self.total_step_count: int = 0
 
         global_cfg = self.plan.get("global_config", {})
-        self.global_max_steps: int = global_cfg.get("max_total_steps", 2400)
+        self.global_max_steps: int = global_cfg.get("max_total_steps", 12000)
+
+        # VQA hooks: optional checker and interval (in steps)
+        self.vqa_checker = vqa_checker
+        self.vqa_interval_steps = int(vqa_interval_steps or 600)
 
         # Terminal flag
         self.finished: bool = False
@@ -93,8 +99,26 @@ class FSMExecutor:
                 self._terminate("invalid_policy_no_instruction")
                 return None
 
+            # Periodic VQA-based completion check (per-state)
+            if self.vqa_checker and self.state_step_count > 0 and self.state_step_count % self.vqa_interval_steps == 0:
+                try:
+                    vqa_result = self.vqa_checker(image, state_def)
+                    if vqa_result is True:
+                        # Pick a sensible next_state from transitions if present
+                        transitions = state_def.get("transitions", [])
+                        next_state = None
+                        for trans in transitions:
+                            if isinstance(trans, dict) and trans.get("next_state"):
+                                next_state = trans.get("next_state")
+                                break
+                        if next_state:
+                            self._transition_to(next_state)
+                            continue
+                except Exception:
+                    logger.exception("VQA checker raised an exception")
+
             # Evaluate timeout-based transitions every step
-            # (No VLM checks, so no need for expensive periodic evaluation)
+            # (No VLM checks otherwise)
             prev_state = self.current_state
             self._evaluate_transitions(image, state_def)
             if self.current_state != prev_state:

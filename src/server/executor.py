@@ -49,12 +49,14 @@ class PurpleExecutor:
         sessions: SessionManager,
         planner_cfg: Optional[dict] = None,
         vla_cfg: Optional[dict] = None,
+        vlm_cfg: Optional[dict] = None,
         device: str = "cuda",
     ):
         self.sessions = sessions
         self.agent = MinecraftPurpleAgent(
             planner_cfg=planner_cfg or {},
             vla_cfg=vla_cfg or {},
+            vlm_cfg=vlm_cfg or {},
             device=device,
         )
         self.agent_states: Dict[str, AgentState] = {}

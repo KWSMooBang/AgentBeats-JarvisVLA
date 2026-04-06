@@ -7,7 +7,7 @@ inside a MineStudio environment loop (no A2A server required).
 
 Usage:
     python examples/run_standalone.py --category combat
-    python examples/run_standalone.py --category mining_and_collecting --max-steps 800
+    python examples/run_standalone.py --category mining_and_collecting --max-steps 12000
     python examples/run_standalone.py --list-categories
 """
 
@@ -73,7 +73,7 @@ def init_env(
     rollout_path: str,
     obs_size: Tuple[int, int] = (640, 360),
     render_size: Tuple[int, int] = (640, 360),
-    max_steps: int = 600,
+    max_steps: int = 12000,
     fps: int = 20,
 ):
     from minestudio.simulator import MinecraftSim
@@ -325,7 +325,7 @@ def main():
     )
     parser.add_argument("--tasks-dir", type=str, default="assets/mcu_tasks")
     parser.add_argument("--output-dir", type=str, default="./outputs")
-    parser.add_argument("--max-steps", type=int, default=600)
+    parser.add_argument("--max-steps", type=int, default=12000)
     parser.add_argument("--obs-size", type=int, nargs=2, default=[640, 360])
     parser.add_argument("--verbose", action="store_true", default=True)
 
@@ -334,6 +334,13 @@ def main():
     parser.add_argument("--planner-url", type=str, default="https://api.openai.com/v1")
     parser.add_argument("--planner-model", type=str, default="gpt-4o")
     parser.add_argument("--planner-temperature", type=float, default=0.2)
+
+    # VLM runtime (required)
+    parser.add_argument("--vlm-api-key", type=str, default="EMPTY")
+    parser.add_argument("--vlm-url", type=str, default="https://api.openai.com/v1")
+    parser.add_argument("--vlm-model", type=str, default="gpt-4o")
+    parser.add_argument("--vlm-temperature", type=float, default=0.2)
+    parser.add_argument("--vqa-interval-steps", type=int, default=600)
 
     # JarvisVLA instruction runner (required)
     parser.add_argument("--vla-checkpoint-path", type=str, required=True)
@@ -373,7 +380,6 @@ def main():
         "temperature": args.planner_temperature,
     }
     vla_cfg = {
-        "enabled": True,
         "checkpoint_path": args.vla_checkpoint_path,
         "base_url": args.vla_url,
         "api_key": args.vla_api_key,
@@ -384,10 +390,18 @@ def main():
         "temperature": args.vla_temperature,
         "convert_camera_21_to_11": not args.vla_no_camera_convert,
     }
+    vlm_cfg = {
+        "api_key": args.vlm_api_key,
+        "base_url": args.vlm_url,
+        "model": args.vlm_model,
+        "temperature": args.vlm_temperature,
+        "vqa_interval_steps": args.vqa_interval_steps,
+    }
 
     agent = MinecraftPurpleAgent(
         planner_cfg=planner_cfg,
         vla_cfg=vla_cfg,
+        vlm_cfg=vlm_cfg,
         output_dir=args.output_dir,
     )
 

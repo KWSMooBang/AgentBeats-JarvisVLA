@@ -13,20 +13,27 @@ Fallback behavior (long mode):
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import re
 from typing import Optional
 
+import numpy as np
+from PIL import Image
+
 from src.planner.prompt_template import (
     HORIZON_SYSTEM_PROMPT,
     SHORT_DIRECTIVE_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
+    VQA_SUBGOAL_SYSTEM_PROMPT,
     REPLAN_ADDENDUM,
     build_horizon_prompt,
     build_short_directive_prompt,
     build_planner_prompt,
-    classify_task_horizon,
+    build_vqa_subgoal_prompt,
+    fallback_classify_task_horizon,
 )
 from src.planner.instruction_registry import (
     canonicalize_instruction_key,
@@ -38,7 +45,7 @@ from src.planner.validator import PlanValidator
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FALLBACK_MAX_STEPS = 600
+DEFAULT_FALLBACK_MAX_STEPS = 1200
 
 
 def _extract_task_tokens(task_text: str) -> list[str]:
@@ -196,6 +203,75 @@ def _repair_instruction_candidate(
     return _guess_strict_instruction_from_task(task_text, strict_keys)
 
 
+def _build_instruction_examples_addendum(
+    task_text: str,
+    strict_keys: set[str],
+    max_examples: int = 12,
+) -> str:
+    """Return a compact, task-relevant strict key sample list for prompts.
+
+    This intentionally provides only a few examples (not exhaustive) to avoid
+    prompt bloat while still anchoring the model to valid key patterns.
+    """
+    if not strict_keys:
+        return ""
+
+    tokens = _extract_task_tokens(task_text)
+    variants: list[str] = []
+    for token in tokens:
+        variants.extend(_token_variants(token))
+    variants = list(dict.fromkeys(v for v in variants if v))
+
+    prefers_combat = _contains_any(task_text, ("combat", "kill", "defeat", "hunt"))
+    prefers_craft = _contains_any(task_text, ("craft", "make", "recipe"))
+    prefers_mine = _contains_any(task_text, ("mine", "collect", "gather"))
+
+    prefix_order = ["kill_entity", "craft_item", "mine_block", "pickup", "use_item", "drop"]
+    if prefers_craft:
+        prefix_order = ["craft_item", "mine_block", "kill_entity", "pickup", "use_item", "drop"]
+    elif prefers_mine:
+        prefix_order = ["mine_block", "craft_item", "kill_entity", "pickup", "use_item", "drop"]
+    elif prefers_combat:
+        prefix_order = ["kill_entity", "use_item", "pickup", "mine_block", "craft_item", "drop"]
+
+    chosen: list[str] = []
+
+    # Prefer token-related examples first.
+    if variants:
+        for prefix in prefix_order:
+            for key in sorted(strict_keys):
+                if not key.startswith(f"{prefix}:"):
+                    continue
+                item = key.split(":", 1)[1]
+                if any(v in item or item in v for v in variants):
+                    chosen.append(key)
+                    if len(chosen) >= max_examples:
+                        break
+            if len(chosen) >= max_examples:
+                break
+
+    # Backfill with a small generic sample by preferred prefixes.
+    if len(chosen) < max_examples:
+        for prefix in prefix_order:
+            for key in sorted(strict_keys):
+                if key.startswith(f"{prefix}:") and key not in chosen:
+                    chosen.append(key)
+                    if len(chosen) >= max_examples:
+                        break
+            if len(chosen) >= max_examples:
+                break
+
+    if not chosen:
+        return ""
+
+    lines = "\n".join(f"- {k}" for k in chosen[:max_examples])
+    return (
+        "\n\nReference examples from instructions.json (NOT exhaustive):\n"
+        f"{lines}\n"
+        "You may output other valid strict keys not listed above if they better fit the task."
+    )
+
+
 def _iter_transition_targets(trans: dict) -> list[str]:
     targets: list[str] = []
     for key in ("next_state", "on_true", "on_false"):
@@ -250,6 +326,7 @@ def ensure_timeout_fallback(plan: dict, task_text: str) -> dict:
         logger.info("Injected fallback state with self-loop transition")
     else:
         fallback_state["description"] = fallback_state.get("description", "fallback")
+
         fallback_state["instruction"] = task_text
         fallback_state["instruction_type"] = "normal"
         transitions = fallback_state.get("transitions")
@@ -355,7 +432,7 @@ def validate_long_horizon_constraints(plan: dict) -> list[str]:
     return []
 
 
-class LLMPlanner:
+class Planner:
     """
     OpenAI-compatible planner.
 
@@ -369,7 +446,7 @@ class LLMPlanner:
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4o",
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_completion_tokens: int = 4096,
         max_retries: int = 2,
     ):
         from openai import OpenAI
@@ -377,7 +454,7 @@ class LLMPlanner:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.temperature = temperature
-        self.max_tokens = max_tokens
+        self.max_completion_tokens = max_completion_tokens
         self.max_retries = max_retries
         self.validator = PlanValidator()
 
@@ -390,33 +467,46 @@ class LLMPlanner:
         task_text: str,
         feedback: Optional[list[str]] = None,
         force_horizon: Optional[str] = None,
+        observation_image: Optional[np.ndarray] = None,
     ) -> dict:
-        horizon = force_horizon or self.classify_horizon(task_text)
+        horizon = force_horizon or self.classify_horizon(task_text, observation_image=observation_image)
 
         if horizon == "short":
-            short_directive = self.generate_short_directive(task_text, feedback=feedback)
+            short_directive = self.generate_short_directive(
+                task_text,
+                feedback=feedback,
+                observation_image=observation_image,
+            )
             return {
                 "horizon": "short",
                 "instruction": short_directive["instruction"],
                 "instruction_type": short_directive["instruction_type"],
             }
 
-        long_plan = self.generate_long_plan(task_text, feedback=feedback)
+        long_plan = self.generate_long_plan(
+            task_text,
+            feedback=feedback,
+            observation_image=observation_image,
+        )
         return {
             "horizon": "long",
             "plan": long_plan,
         }
 
-    def classify_horizon(self, task_text: str) -> str:
+    def classify_horizon(self, task_text: str, observation_image: Optional[np.ndarray] = None) -> str:
         user_prompt = build_horizon_prompt(task_text)
-        raw = self._call_llm(HORIZON_SYSTEM_PROMPT, user_prompt)
+        raw = self._call_llm(
+            HORIZON_SYSTEM_PROMPT,
+            user_prompt,
+            observation_image=observation_image,
+        )
         parsed = self._parse_json(raw)
         if isinstance(parsed, dict):
             horizon = parsed.get("horizon")
             if horizon in {"short", "long"}:
                 return horizon
 
-        fallback = classify_task_horizon(task_text)
+        fallback = fallback_classify_task_horizon(task_text)
         logger.warning("Horizon classification fallback heuristic used -> %s", fallback)
         return fallback
 
@@ -424,14 +514,20 @@ class LLMPlanner:
         self,
         task_text: str,
         feedback: Optional[list[str]] = None,
+        observation_image: Optional[np.ndarray] = None,
     ) -> dict:
         strict_keys = get_strict_instruction_keys()
         user_prompt = build_short_directive_prompt(task_text)
+        user_prompt += _build_instruction_examples_addendum(task_text, strict_keys)
         if feedback:
             user_prompt += REPLAN_ADDENDUM.format(errors="\n".join(f"- {e}" for e in feedback))
 
         for attempt in range(1 + self.max_retries):
-            raw = self._call_llm(SHORT_DIRECTIVE_SYSTEM_PROMPT, user_prompt)
+            raw = self._call_llm(
+                SHORT_DIRECTIVE_SYSTEM_PROMPT,
+                user_prompt,
+                observation_image=observation_image,
+            )
             parsed = self._parse_json(raw)
             if not isinstance(parsed, dict):
                 user_prompt = (
@@ -454,12 +550,13 @@ class LLMPlanner:
                     task_text=task_text,
                     strict_keys=strict_keys,
                 )
-                if repaired is None:
-                    errors.append(
-                        f"instruction '{instruction}' is not a valid strict instructions.json key"
-                    )
-                else:
+                if repaired is not None:
                     instruction = repaired
+                else:
+                    # If strict conversion is ambiguous/impossible, keep raw task text
+                    # so downstream VLM execution can handle free-form instruction.
+                    instruction = task_text
+                    instruction_type = "normal"
 
             if instruction_type not in {"auto", "simple", "normal", "recipe"}:
                 errors.append("instruction_type must be one of: auto, simple, normal, recipe")
@@ -489,13 +586,20 @@ class LLMPlanner:
         self,
         task_text: str,
         feedback: Optional[list[str]] = None,
+        observation_image: Optional[np.ndarray] = None,
     ) -> dict:
+        strict_keys = get_strict_instruction_keys()
         user_prompt = build_planner_prompt(task_text)
+        user_prompt += _build_instruction_examples_addendum(task_text, strict_keys)
         if feedback:
             user_prompt += REPLAN_ADDENDUM.format(errors="\n".join(f"- {e}" for e in feedback))
 
         for attempt in range(1 + self.max_retries):
-            raw = self._call_llm(PLANNER_SYSTEM_PROMPT, user_prompt)
+            raw = self._call_llm(
+                PLANNER_SYSTEM_PROMPT,
+                user_prompt,
+                observation_image=observation_image,
+            )
             parsed = self._parse_json(raw)
             if parsed is None:
                 logger.warning("Attempt %d: failed to parse JSON", attempt + 1)
@@ -534,6 +638,37 @@ class LLMPlanner:
             return canonical_to_simplified_plan(canonical_plan)
         return parsed if "parsed" in locals() and parsed is not None else {}
 
+    def vqa_check_subgoal(
+        self,
+        task_text: str,
+        state_def: dict,
+        observation_image: Optional[np.ndarray] = None,
+    ) -> Optional[bool]:
+        """Planner-owned VQA check for subgoal completion.
+
+        Returns True / False, or None when the result is not parseable.
+        """
+        if observation_image is None:
+            return None
+
+        user_prompt = build_vqa_subgoal_prompt(task_text, state_def)
+        raw = self._call_llm(
+            VQA_SUBGOAL_SYSTEM_PROMPT,
+            user_prompt,
+            observation_image=observation_image,
+        )
+
+        parsed = self._parse_json(raw)
+        if isinstance(parsed, dict) and isinstance(parsed.get("completed"), bool):
+            return bool(parsed["completed"])
+
+        lowered = (raw or "").strip().lower()
+        if lowered.startswith("yes"):
+            return True
+        if lowered.startswith("no"):
+            return False
+        return None
+
     # ------------------------------------------------------------------
 
     def _default_short_instruction(self, task_text: str) -> str:
@@ -548,16 +683,55 @@ class LLMPlanner:
 
         return task_text.strip()
 
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
+    def _encode_image_data_url(self, image: np.ndarray) -> Optional[str]:
         try:
+            if image is None:
+                return None
+            if not isinstance(image, np.ndarray):
+                return None
+            if image.ndim != 3 or image.shape[2] != 3:
+                return None
+
+            pil_img = Image.fromarray(image.astype(np.uint8), mode="RGB")
+            buf = io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=90)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            logger.exception("Failed to encode observation image for LLM")
+            return None
+
+    def _call_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        observation_image: Optional[np.ndarray] = None,
+    ) -> str:
+        try:
+            user_content: object
+            if observation_image is None:
+                user_content = user_prompt
+            else:
+                image_url = self._encode_image_data_url(observation_image)
+                if image_url is None:
+                    user_content = user_prompt
+                else:
+                    user_content = [
+                        {"type": "text", "text": user_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_url},
+                        },
+                    ]
+
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                max_completion_tokens=self.max_completion_tokens,
             )
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:

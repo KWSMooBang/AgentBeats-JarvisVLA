@@ -20,7 +20,7 @@ RESERVED_TOP_LEVEL_KEYS = frozenset({
 })
 
 DEFAULT_GLOBAL_CONFIG = {
-    "max_total_steps": 2400,
+    "max_total_steps": 12000,
     "on_global_timeout": "abort",
 }
 
@@ -102,7 +102,7 @@ def _auto_link_linear_steps(states: dict[str, Any]) -> None:
         # If no timeout transition, add one linking to next step.
         if not has_timeout_trans:
             transitions.append({
-                "condition": {"type": "timeout", "max_steps": 600},
+                "condition": {"type": "timeout", "max_steps": 1200},
                 "next_state": next_step,
             })
 

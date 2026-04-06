@@ -28,9 +28,16 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # ── LLM Planner config ──────────────────────────────────────────────────────
 PLANNER_API_KEY="${PLANNER_API_KEY:-${API_KEY:-EMPTY}}"
-PLANNER_URL="${PLANNER_URL:-${URL:-https://api.tokenfactory.nebius.com/v1/}}"
-PLANNER_MODEL="${PLANNER_MODEL:-${MODEL:-openai/gpt-oss-120b-fast}}"
+PLANNER_URL="${PLANNER_URL:-${URL:-https://api.openai.com/v1}}"
+PLANNER_MODEL="${PLANNER_MODEL:-${MODEL:-gpt-5.4-mini}}"
 PLANNER_TEMPERATURE="${PLANNER_TEMPERATURE:-0.2}"
+
+# ── Runtime VLM config (required) ───────────────────────────────────────────
+VLM_API_KEY="${VLM_API_KEY:-${API_KEY:-EMPTY}}"
+VLM_URL="${VLM_URL:-${URL:-https://api.openai.com/v1}}"
+VLM_MODEL="${VLM_MODEL:-${MODEL:-gpt-5.4-mini}}"
+VLM_TEMPERATURE="${VLM_TEMPERATURE:-0.2}"
+VQA_INTERVAL_STEPS="${VQA_INTERVAL_STEPS:-600}"
 
 # ── JarvisVLA config (required) ─────────────────────────────────────────────
 VLA_CHECKPOINT_PATH="${VLA_CHECKPOINT_PATH:-./models/JarvisVLA-Qwen2-VL-7B}"
@@ -50,7 +57,7 @@ fi
 # ── Task / output config ────────────────────────────────────────────────────
 TASKS_DIR="${TASKS_DIR:-./tasks}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs}"
-MAX_STEPS="${MAX_STEPS:-12000}"
+MAX_STEPS="${MAX_STEPS:-100}"
 OBS_SIZE="${OBS_SIZE:-640 360}"
 
 # ==============================================================================
@@ -59,6 +66,8 @@ echo "  Scripted Policy — MCU Benchmark"
 echo "========================================"
 echo "  Category       : $CATEGORY"
 echo "  Planner model  : $PLANNER_MODEL"
+echo "  VLM model      : $VLM_MODEL"
+echo "  VLM endpoint   : $VLM_URL"
 echo "  VLA model path : $VLA_CHECKPOINT_PATH"
 echo "  VLA endpoint   : $VLA_URL"
 echo "  Max steps      : $MAX_STEPS"
@@ -77,6 +86,11 @@ python examples/run_standalone.py \
     --planner-url "$PLANNER_URL" \
     --planner-model "$PLANNER_MODEL" \
     --planner-temperature "$PLANNER_TEMPERATURE" \
+    --vlm-api-key "$VLM_API_KEY" \
+    --vlm-url "$VLM_URL" \
+    --vlm-model "$VLM_MODEL" \
+    --vlm-temperature "$VLM_TEMPERATURE" \
+    --vqa-interval-steps "$VQA_INTERVAL_STEPS" \
     --vla-checkpoint-path "$VLA_CHECKPOINT_PATH" \
     --vla-url "$VLA_URL" \
     --vla-api-key "$VLA_API_KEY" \

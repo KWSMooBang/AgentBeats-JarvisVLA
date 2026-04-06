@@ -41,20 +41,26 @@ def main() -> None:
     # LLM Planner config
     parser.add_argument("--planner-api-key", type=str, default="EMPTY")
     parser.add_argument("--planner-url", type=str, default="https://api.openai.com/v1")
-    parser.add_argument("--planner-model", type=str, default="gpt-4o")
+    parser.add_argument("--planner-model", type=str, default="gpt-5.4-mini")
     parser.add_argument("--planner-temperature", type=float, default=0.2)
 
-    # JarvisVLA instruction runner (required)
-    parser.add_argument("--vla-enabled", action="store_true")
+    # JarvisVLA instruction runner
     parser.add_argument("--vla-checkpoint-path", type=str, default="")
     parser.add_argument("--vla-url", type=str, default="http://localhost:8000/v1")
     parser.add_argument("--vla-api-key", type=str, default="EMPTY")
     parser.add_argument("--vla-history-num", type=int, default=4)
     parser.add_argument("--vla-action-chunk-len", type=int, default=1)
     parser.add_argument("--vla-bpe", type=int, default=0)
-    parser.add_argument("--vla-instruction-type", type=str, default="normal")
+    parser.add_argument("--vla-instruction-type", type=str, default="auto")
     parser.add_argument("--vla-temperature", type=float, default=0.7)
     parser.add_argument("--vla-no-camera-convert", action="store_true")
+
+    # OpenAI VLM runner
+    parser.add_argument("--vlm-api-key", type=str, default="EMPTY")
+    parser.add_argument("--vlm-url", type=str, default="https://api.openai.com/v1")
+    parser.add_argument("--vlm-model", type=str, default="gpt-5.4-mini")
+    parser.add_argument("--vlm-temperature", type=float, default=0.2)
+    parser.add_argument("--vqa-interval-steps", type=int, default=600)
 
     parser.add_argument("--device", type=str, default="cuda")
 
@@ -70,7 +76,6 @@ def main() -> None:
         "temperature": args.planner_temperature,
     }
     vla_cfg = {
-        "enabled": True,
         "checkpoint_path": args.vla_checkpoint_path,
         "base_url": args.vla_url,
         "api_key": args.vla_api_key,
@@ -82,11 +87,20 @@ def main() -> None:
         "convert_camera_21_to_11": not args.vla_no_camera_convert,
     }
 
+    vlm_cfg = {
+        "api_key": args.vlm_api_key,
+        "base_url": args.vlm_url,
+        "model": args.vlm_model,
+        "temperature": args.vlm_temperature,
+        "vqa_interval_steps": args.vqa_interval_steps,
+    }
+
     sessions = SessionManager()
     executor = PurpleExecutor(
         sessions=sessions,
         planner_cfg=planner_cfg,
         vla_cfg=vla_cfg,
+        vlm_cfg=vlm_cfg,
         device=args.device,
     )
 

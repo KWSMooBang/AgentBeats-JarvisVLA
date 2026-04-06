@@ -77,16 +77,28 @@ class PlanValidator:
                 elif registry_ok and not is_fallback_state:
                     canonical = canonicalize_instruction_key(instruction)
                     if canonical is None or canonical not in instruction_keys:
-                        suggestions = difflib.get_close_matches(
-                            instruction,
-                            sorted(instruction_keys),
-                            n=3,
-                            cutoff=0.65,
-                        )
-                        hint = f" Did you mean: {', '.join(suggestions)}" if suggestions else ""
-                        errors.append(
-                            f"State '{name}' instruction '{instruction}' is not a valid instructions.json key.{hint}"
-                        )
+                        # Allow free-form natural-language instructions for cases
+                        # where strict instruction keys are not suitable.
+                        if ":" not in instruction:
+                            errors.append(
+                                f"Warning: state '{name}' instruction '{instruction}' is not a strict instructions.json key; using free-form VLM instruction"
+                            )
+                            canonical = None
+                        else:
+                            suggestions = difflib.get_close_matches(
+                                instruction,
+                                sorted(instruction_keys),
+                                n=3,
+                                cutoff=0.65,
+                            )
+                            hint = f" Did you mean: {', '.join(suggestions)}" if suggestions else ""
+                            errors.append(
+                                f"State '{name}' instruction '{instruction}' is not a valid instructions.json key.{hint}"
+                            )
+                            canonical = None
+
+                    if canonical is None:
+                        pass
                     elif not is_strict_instruction_key(canonical):
                         errors.append(
                             f"State '{name}' instruction '{instruction}' must use strict prefix:item format"
