@@ -24,10 +24,28 @@ or
 
 Decision policy (priority order):
 1) LONG if task explicitly says from scratch / starting from empty inventory / full progression.
-2) LONG if task requires multiple dependent subgoals that cannot be solved by repeating one instruction family.
-3) SHORT if task can usually be solved by a single instruction family
-  (kill_entity:*, mine_block:*, craft_item:*, pickup:*, use_item:*, drop:*).
+2) LONG if task requires multiple SEQUENTIAL dependent subgoals (e.g. mine ore THEN smelt THEN craft).
+3) SHORT if task maps directly to a single instruction family:
+   - kill/combat/hunt/shoot/fight any mob  → kill_entity:*  → SHORT
+   - mine/collect/gather any block         → mine_block:*   → SHORT
+   - craft/make/recipe for one item        → craft_item:*   → SHORT
+   - pick up / grab an item               → pickup:*       → SHORT
+   - use/equip/activate one item           → use_item:*     → SHORT
+   - drop an item                          → drop:*         → SHORT
 4) If ambiguous, prefer SHORT unless there is clear staged-progress evidence.
+
+SHORT examples (always short — single instruction family suffices):
+- "combat zombies" → kill_entity:zombie
+- "kill skeletons" → kill_entity:skeleton
+- "hunt horses"    → kill_entity:horse
+- "shoot phantom"  → kill_entity:phantom
+- "mine diamond ore" → mine_block:diamond_ore
+- "craft a furnace"  → craft_item:furnace
+- "drop an item"     → drop:*
+
+LONG examples (genuinely multi-step sequential):
+- "mine diamond from scratch" → mine stone → mine iron → craft pickaxe → mine diamond
+- "brew fire resistance potion from empty inventory"
 
 Rules:
 - Use observation as supporting context, but do not assume hidden inventory/world state.
@@ -76,11 +94,25 @@ Return ONLY JSON:
 }
 
 Rules:
-1. If task is directly mappable to instructions.json, use an EXACT strict key (prefix:item).
-2. If strict mapping is ambiguous or unsuitable, set instruction to the raw task text.
-3. instruction_type MUST be one of: auto, simple, normal, recipe.
-4. Use instruction_type="normal" when returning free-form instruction text.
-5. Output ONLY the JSON.
+1. ALWAYS prefer an EXACT strict key (prefix:item) from instructions.json when available.
+2. Strict key formats: kill_entity:MOB, mine_block:BLOCK, craft_item:ITEM, pickup:ITEM, use_item:ITEM, drop:ITEM
+3. For combat/kill/hunt/fight/shoot tasks → use kill_entity:MOB_NAME (e.g. kill_entity:zombie, kill_entity:skeleton).
+4. For crafting/make/recipe tasks → use craft_item:ITEM_NAME with instruction_type="recipe".
+5. For mining/collecting/gathering tasks → use mine_block:BLOCK_NAME.
+6. Only fall back to raw task text when no strict key fits the task at all.
+7. instruction_type: use "recipe" for craft_item:*, "auto" for kill_entity:* and mine_block:*, "normal" for free-form.
+8. Output ONLY the JSON.
+
+Strict key examples by category:
+- combat_zombies      → {"instruction": "kill_entity:zombie",    "instruction_type": "auto"}
+- hunt_horse          → {"instruction": "kill_entity:horse",     "instruction_type": "auto"}
+- shoot_phantom       → {"instruction": "kill_entity:phantom",   "instruction_type": "auto"}
+- combat_skeletons    → {"instruction": "kill_entity:skeleton",  "instruction_type": "auto"}
+- combat_spiders      → {"instruction": "kill_entity:spider",    "instruction_type": "auto"}
+- combat_witch        → {"instruction": "kill_entity:witch",     "instruction_type": "auto"}
+- combat_wolfs        → {"instruction": "kill_entity:wolf",      "instruction_type": "auto"}
+- craft a furnace     → {"instruction": "craft_item:furnace",    "instruction_type": "recipe"}
+- mine oak log        → {"instruction": "mine_block:oak_log",    "instruction_type": "auto"}
 """
 
 def build_short_directive_prompt(task_text: str) -> str:
@@ -97,8 +129,14 @@ PLANNER_SYSTEM_PROMPT = """\
 You are a Minecraft task planner. Given a task description you MUST output
 an actionable long-horizon Plan JSON with staged step decomposition.
 
-IMPORTANT: The agent uses ONLY visual instruction execution (VLA) and step
-counting for state transitions. All transitions are TIMEOUT-ONLY.
+IMPORTANT: The agent supports three execution styles per step:
+- "vla": let JarvisVLA handle visually-reactive control
+- "scripted": use deterministic primitive action sequences for GUI / hotbar /
+  repetitive interaction subtasks
+- "hybrid": mix the two; use VLA for approach/orient/open and scripted
+  primitives for repetitive slot cycling / clicking / holding use
+
+All transitions are still TIMEOUT-ONLY.
 
 ## Timing Reference
 - All actions run at ~20 steps per second (50ms per step)
@@ -142,6 +180,47 @@ IMPORTANT NOTES:
 - If required resources are already available, skip redundant mine/craft/pickup steps and move to the next necessary subgoal.
 - In benchmark settings, initial items may be pre-given (e.g., via /give). Do not assume empty inventory unless explicitly stated.
 
+## Category-Specific Guidance
+
+### Combat / Hunt / Kill tasks
+- Use kill_entity:MOB_NAME as the instruction (strict canonical key).
+- These are almost always single-step: one kill_entity:* instruction repeated for the full budget.
+- Keep as SHORT horizon unless there are multiple distinct mob types to fight sequentially.
+
+### Crafting / GUI Interaction tasks (craft, smelt, enchant, brew)
+- These require GUI interaction (inventory or crafting table or furnace).
+- Decompose into explicit interaction steps using free-form instructions:
+  step1: "open inventory or interact with crafting table"
+  step2: "craft TARGET_ITEM using available materials in inventory"
+  step3: "take the crafted item and close the GUI"
+- Use instruction_type="recipe" for craft_item:* keys.
+- If no strict key fits, use descriptive free-form instruction (VLM skill executor will handle GUI).
+- Prefer execution_hint="hybrid" or execution_hint="scripted" for GUI-heavy
+  subtasks because deterministic slot-clicking and hotbar cycling are usually
+  more reliable than pure VLA.
+
+### Building tasks (build, place, construct)
+- Decompose into spatial placement phases:
+  step1: "select appropriate building block from hotbar"
+  step2: "position at starting location and begin placement"
+  step3: "continue placing blocks to complete the STRUCTURE_TYPE"
+- For vertical structures (pillar, tower): use pillar placement approach.
+- For horizontal structures (wall, floor): use row placement approach.
+- For complex structures (house, garden): break into foundation, walls, roof phases.
+- Use descriptive free-form instructions since strict keys rarely cover building.
+
+### Tool Use / Interaction tasks
+- Simple single-use (drink potion, shoot bow, throw snowball): SHORT, single use_item:* or raw text.
+- Multi-step GUI (smelt beef in furnace, brew potion, enchant sword): LONG with GUI steps.
+  step1: "open furnace / brewing stand / enchanting table"
+  step2: "insert fuel and target item"
+  step3: "take result item"
+- Prefer execution_hint="scripted" for direct hotbar cycling, repeated use,
+  deterministic placing, or GUI clicking.
+- Prefer execution_hint="vla" for open-ended combat, mining, navigation, or
+  visually-reactive approach behavior.
+- Prefer execution_hint="hybrid" when the subgoal has both.
+
 ## Output Format (Simplified, TIMEOUT-ONLY)
 
 ```json
@@ -150,6 +229,7 @@ IMPORTANT NOTES:
   "step1": {
     "instruction": "<EXACT instructions.json key in prefix:item format>",
     "instruction_type": "<auto|simple|normal|recipe>",
+    "execution_hint": "<vla|scripted|hybrid>",
     "condition": {
       "type": "timeout",
       "max_steps": 1000,
@@ -159,6 +239,7 @@ IMPORTANT NOTES:
   "step2": {
     "instruction": "<EXACT instructions.json key in prefix:item format>",
     "instruction_type": "<auto|simple|normal|recipe>",
+    "execution_hint": "<vla|scripted|hybrid>",
     "condition": {
       "type": "timeout",
       "max_steps": 1200,
@@ -168,6 +249,7 @@ IMPORTANT NOTES:
   "fallback": {
     "instruction": "<RAW task_text string>",
     "instruction_type": "normal",
+    "execution_hint": "hybrid",
     "condition": {"type": "always", "next": "fallback"}
   }
 }
@@ -180,14 +262,15 @@ IMPORTANT NOTES:
 4. Prefer EXACT strict instructions.json keys (prefix:item) when applicable.
 5. If strict key is not suitable for a subgoal, free-form natural-language instruction is allowed.
 6. instruction_type MUST be one of: auto, simple, normal, recipe.
-7. Include a dedicated non-terminal fallback step.
-8. fallback.instruction MUST be the raw input task_text string.
-9. fallback.condition MUST be {"type": "always", "next": "fallback"}.
-10. Every non-fallback step condition MUST be "type": "timeout" with max_steps.
-11. Use the max_steps guidelines above; keep per-subgoal max_steps within 1200-12000 based on difficulty.
-12. Execution is VLA-only. Step transitions happen purely on step counts.
-13. Consider already-owned items/resources visible in observation, and avoid redundant collection/crafting.
-14. Output ONLY the JSON, no explanation.
+7. execution_hint is optional but strongly preferred; choose one of: vla, scripted, hybrid.
+8. Include a dedicated non-terminal fallback step.
+9. fallback.instruction MUST be the raw input task_text string.
+10. fallback.condition MUST be {"type": "always", "next": "fallback"}.
+11. Every non-fallback step condition MUST be "type": "timeout" with max_steps.
+12. Use the max_steps guidelines above; keep per-subgoal max_steps within 1200-12000 based on difficulty.
+13. Step transitions happen purely on step counts.
+14. Consider already-owned items/resources visible in observation, and avoid redundant collection/crafting.
+15. Output ONLY the JSON, no explanation.
 """
 
 

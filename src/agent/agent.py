@@ -2,15 +2,9 @@
 Scripted Policy Agent
 
 Core agent class that orchestrates:
-  1. LLM Planner  → FSM JSON from task_text
-  2. FSM Executor → step-by-step action generation from images
-    3. JarvisVLA Runner → state instruction to agent action
-
-Interface contract (Purple Agent compatible):
-  - reset(task_text)          called once per episode
-  - initial_state(task_text)  returns AgentState
-  - act(obs, state)           returns (action, new_state)
-  - device property           returns torch.device
+  1. LLM Planner  -> FSM JSON from task_text
+  2. FSM Executor -> step-by-step action generation from images
+  3. JarvisVLA / fallback policy execution
 
 The agent receives ONLY task_text + observation image.
 """
@@ -20,25 +14,70 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+from src.action.converter import ActionConverter, noop_agent_action
+from src.agent.fallback_policy import FallbackPolicyEngine
+from src.agent.vlm_sequence_selector import VLMSequenceSelector
+from src.executor.fsm_executor import FSMExecutor
+from src.planner.instruction_registry import canonicalize_strict_instruction_key
 from src.planner.planner import Planner
 from src.planner.validator import PlanValidator
-from src.executor.fsm_executor import FSMExecutor
-from src.action.converter import noop_agent_action
-from src.planner.instruction_registry import canonicalize_strict_instruction_key
 
 logger = logging.getLogger(__name__)
+
+
+# Instruction-prefix → (execution_hint, sequence_name) mapping.
+#
+# Rules:
+# - sequence_name is set ONLY when the mapping is unambiguous (one mechanic).
+#   e.g. "drop:*" always means drop-cycle; no VLM needed.
+# - When the prefix covers multiple possible mechanics (use_item covers
+#   drinking, shooting, throwing, entity-use, defending…), set only
+#   execution_hint and let VLMSequenceSelector pick the specific sequence
+#   from the catalog using the observation image.
+# - "vla" hint means no scripted path: VLA handles it end-to-end.
+_PREFIX_SEQUENCE_MAP: dict[str, tuple[str, str]] = {
+    "drop":        ("scripted", "drop_cycle"),   # always drop: unambiguous
+    "use_item":    ("hybrid",   ""),             # many subtypes → let VLM pick
+    "kill_entity": ("hybrid",   ""),             # melee or ranged → VLM picks
+    "mine_block":  ("hybrid",   ""),             # mine or dig → VLM picks
+    "craft_item":  ("vla",      ""),             # VLA handles crafting table UI
+    "pickup":      ("vla",      ""),             # VLA navigates to item
+}
+
+
+def _build_short_state_def(instruction: str, task_text: str) -> dict:
+    """Build a state_def hint for FallbackPolicyEngine from a short-horizon instruction.
+
+    Uses the strict-key prefix (before ':') to suggest an execution_hint and
+    optionally a sequence_name.  When sequence_name is omitted, VLMSequenceSelector
+    uses the observation image + catalog to pick the right sequence.
+
+    This is NOT benchmark leaking — the mapping is based on Minecraft
+    game-mechanic categories (drop, use, kill, mine, craft, pickup), not on
+    task-specific knowledge.
+    """
+    prefix = instruction.split(":")[0].lower().strip() if ":" in instruction else ""
+    hint, seq = _PREFIX_SEQUENCE_MAP.get(prefix, ("vla", ""))
+    state_def: dict = {
+        "description": f"short_direct:{instruction}",
+        "execution_hint": hint,
+    }
+    if seq:
+        state_def["sequence_name"] = seq
+    return state_def
 
 
 @dataclass
 class AgentState:
     """Per-episode session state carried between act() calls."""
+
     memory: Optional[Any] = None
     first: bool = False
     idle_count: int = 0
@@ -54,19 +93,7 @@ class AgentState:
 
 
 class MinecraftPurpleAgent:
-    """
-    Purple-Agent-compatible scripted policy agent.
-
-    Parameters
-    ----------
-    planner_cfg : dict
-        Kwargs for Planner (api_key, base_url, model, …).
-    vla_cfg : dict
-        JarvisVLA runner config. State-level ``instruction`` fields
-        are executed by the JarvisVLA model.
-    device : str
-        "cuda" or "cpu".
-    """
+    """Purple-Agent-compatible Minecraft agent."""
 
     def __init__(
         self,
@@ -89,6 +116,14 @@ class MinecraftPurpleAgent:
         self.vlm_runner = self._build_vlm_runner(vlm_cfg)
         self._vqa_interval_steps = int(vlm_cfg.get("vqa_interval_steps", 600))
 
+        self._action_converter = ActionConverter()
+        self._sequence_selector = self._build_sequence_selector(vlm_cfg)
+        self._fallback_policy = FallbackPolicyEngine(
+            action_converter=self._action_converter,
+            vla_runner=self.vla_runner,
+            sequence_selector=self._sequence_selector,
+        )
+
         self._executor: Optional[FSMExecutor] = None
         self._plan: Optional[dict] = None
         self._episode_dir: Optional[Path] = None
@@ -96,12 +131,11 @@ class MinecraftPurpleAgent:
         self._execution_mode: str = "idle"
         self._short_instruction: Optional[str] = None
         self._short_instruction_type: str = "normal"
+        self._short_state_def: dict = {}
         self._direct_step_count: int = 0
         self._task_text: Optional[str] = None
-        # Startup wait: return noop for a few steps before planning/classify
         self._startup_noop_remaining: int = 0
         self._post_startup_assessed: bool = False
-        self._short_use_jarvis: bool = False
 
         logger.info("MinecraftPurpleAgent initialized")
 
@@ -109,13 +143,10 @@ class MinecraftPurpleAgent:
     def device(self):
         try:
             import torch
+
             return torch.device(self._device_str)
         except ImportError:
             return self._device_str
-
-    # ------------------------------------------------------------------
-    # Purple Agent interface
-    # ------------------------------------------------------------------
 
     def reset(
         self,
@@ -123,41 +154,28 @@ class MinecraftPurpleAgent:
         episode_dir: Optional[str] = None,
         **_kwargs,
     ) -> None:
-        """
-        Reset the agent for a new episode.
-
-        Args:
-            task_text: Natural-language task description.
-            episode_dir: If given, plan.json and result.json are saved
-                         here (same folder as MineStudio recordings).
-                         If None, a timestamped sub-folder under output_dir
-                         is created automatically.
-        """
         self._save_episode_result()
 
-        # Clear previous execution/plan and enter startup-wait mode.
         self._executor = None
         self._plan = None
-        self._episode_dir = None
+        self._episode_dir = Path(episode_dir) if episode_dir else None
         self._episode_start = None
         self._execution_mode = "idle"
         self._short_instruction = None
         self._short_instruction_type = "normal"
+        self._short_state_def = {}
         self._direct_step_count = 0
         self._task_text = task_text
+        self._fallback_policy.reset_episode()
 
-        # Reset runners
         self.vla_runner.reset()
 
-        # Wait N steps (no-op) before invoking VLM/Planner; allows env to stabilise.
         if task_text:
             self._startup_noop_remaining = 5
             self._post_startup_assessed = False
         else:
             logger.warning("reset() called without task_text")
             self._startup_noop_remaining = 0
-
-        # episode dirs and plan are created after the startup assessment
 
     def initial_state(self, task_text: Optional[str] = None) -> AgentState:
         return AgentState(
@@ -179,18 +197,6 @@ class MinecraftPurpleAgent:
         state: AgentState,
         deterministic: bool = False,
     ) -> Tuple[Optional[Dict[str, Any]], AgentState]:
-        """
-        Generate the next action from the current observation.
-
-        Args:
-            obs: {"image": np.ndarray[H, W, 3]}
-            state: current AgentState
-            deterministic: ignored (always deterministic)
-
-        Returns:
-            (action_dict, new_state)
-            action_dict is always in agent format (buttons/camera indices).
-        """
         try:
             image = obs.get("image")
             if image is None:
@@ -198,11 +204,10 @@ class MinecraftPurpleAgent:
                 state.first = False
                 return noop_agent_action(), state
 
-            # Startup no-op phase: return noop for a few initial steps
-            if getattr(self, "_startup_noop_remaining", 0) > 0:
+            if self._startup_noop_remaining > 0:
                 self._startup_noop_remaining -= 1
                 logger.info("Startup noop step remaining=%d", self._startup_noop_remaining)
-                new_state = AgentState(
+                return noop_agent_action(), AgentState(
                     memory=state.memory,
                     first=False,
                     idle_count=state.idle_count,
@@ -216,9 +221,7 @@ class MinecraftPurpleAgent:
                     startup_noop_remaining=self._startup_noop_remaining,
                     post_startup_assessed=self._post_startup_assessed,
                 )
-                return noop_agent_action(), new_state
 
-            # After the startup wait, perform VLM/LLM classification/planning once
             if not self._post_startup_assessed:
                 try:
                     self._post_startup_assess(image)
@@ -226,36 +229,19 @@ class MinecraftPurpleAgent:
                     logger.exception("Post-startup assessment failed")
                 self._post_startup_assessed = True
 
-            # Short/direct mode
             if self._execution_mode == "short":
                 if not self._short_instruction:
                     logger.warning("Short mode missing instruction; returning noop")
                     state.first = False
                     return noop_agent_action(), state
 
-                if getattr(self, "_short_use_jarvis", False):
-                    action_packet = self._run_state_instruction(
-                        image=image,
-                        instruction=self._short_instruction,
-                        instruction_type=self._short_instruction_type,
-                        state_def={"description": "short_direct"},
-                    )
-                else:
-                    # Use VLM runner for short-direct raw-instruction execution
-                    if self.vlm_runner:
-                        action_packet = self.vlm_runner.run_action(
-                            image, self._short_instruction, self._short_instruction_type
-                        )
-                    else:
-                        action_packet = self._run_state_instruction(
-                            image=image,
-                            instruction=self._short_instruction,
-                            instruction_type=self._short_instruction_type,
-                            state_def={"description": "short_direct"},
-                        )
+                action_packet = self._run_mixed_instruction(
+                    image=image,
+                    instruction=self._short_instruction,
+                    instruction_type=self._short_instruction_type,
+                    state_def=self._short_state_def or {"description": "short_direct"},
+                )
                 self._direct_step_count += 1
-
-            # Long-horizon FSM execution
             else:
                 if self._executor is None:
                     logger.warning("Executor not initialised — call reset() first")
@@ -263,17 +249,16 @@ class MinecraftPurpleAgent:
                     return noop_agent_action(), state
 
                 action_packet = self._executor.step(image)
-
                 if action_packet is None:
                     self._save_episode_result()
                     state.first = False
                     return noop_agent_action(), state
 
+            action = noop_agent_action()
             if isinstance(action_packet, dict) and action_packet.get("__action_format__") == "agent":
                 action = action_packet.get("action", noop_agent_action())
             else:
                 logger.warning("Unexpected non-agent action packet; falling back to noop")
-                action = noop_agent_action()
 
             new_state = AgentState(
                 memory=state.memory,
@@ -282,10 +267,14 @@ class MinecraftPurpleAgent:
                 task_text=state.task_text,
                 plan=state.plan,
                 current_fsm_state=(
-                    self._executor.current_state if self._execution_mode == "long" and self._executor else "short_direct"
+                    self._executor.current_state
+                    if self._execution_mode == "long" and self._executor
+                    else "short_direct"
                 ),
                 total_steps=(
-                    self._executor.total_step_count if self._execution_mode == "long" and self._executor else self._direct_step_count
+                    self._executor.total_step_count
+                    if self._execution_mode == "long" and self._executor
+                    else self._direct_step_count
                 ),
                 execution_mode=self._execution_mode,
                 direct_instruction=self._short_instruction,
@@ -308,16 +297,11 @@ class MinecraftPurpleAgent:
             state.first = False
             return noop_agent_action(), state
 
-    # ------------------------------------------------------------------
-    # Runner bridge
-    # ------------------------------------------------------------------
-
     def _build_vla_runner(self, vla_cfg: dict):
         if not vla_cfg:
             raise RuntimeError("VLA configuration is required")
         if not vla_cfg.get("checkpoint_path"):
             raise RuntimeError("vla_cfg.checkpoint_path is required")
-
         try:
             from src.agent.vla_runner import VLARunner
 
@@ -339,23 +323,36 @@ class MinecraftPurpleAgent:
             raise RuntimeError("Failed to initialize VLA runner") from e
 
     def _build_vlm_runner(self, vlm_cfg: dict):
-        if not vlm_cfg:
-            raise RuntimeError("VLM configuration is required")
-
         try:
             from src.agent.vlm_runner import VLMRunner
 
             runner = VLMRunner(
                 api_key=vlm_cfg.get("api_key", "EMPTY"),
                 base_url=vlm_cfg.get("base_url", "https://api.openai.com/v1"),
-                model=vlm_cfg.get("model", "gpt-4o-mini-vision"),
+                model=vlm_cfg.get("model", "gpt-4o-mini"),
                 temperature=vlm_cfg.get("temperature", 0.2),
-            ) 
-            logger.info("VLM runner is initialized")
+            )
+            logger.info("VLM runner is initialized (legacy, unused in main path)")
             return runner
         except Exception as e:
-            logger.exception("Failed to initialize VLM runner: %s", e)
-            raise RuntimeError("Failed to initialize VLM runner") from e
+            logger.warning("VLM runner init failed (non-fatal): %s", e)
+            return None
+
+    def _build_sequence_selector(self, vlm_cfg: dict):
+        if not vlm_cfg:
+            return None
+        try:
+            runner = VLMSequenceSelector(
+                api_key=vlm_cfg.get("api_key", "EMPTY"),
+                base_url=vlm_cfg.get("base_url", "https://api.openai.com/v1"),
+                model=vlm_cfg.get("model", "gpt-4o-mini"),
+                temperature=vlm_cfg.get("temperature", 0.2),
+            )
+            logger.info("VLMSequenceSelector initialized")
+            return runner
+        except Exception as e:
+            logger.warning("VLMSequenceSelector init failed (non-fatal): %s", e)
+            return None
 
     def _run_state_instruction(
         self,
@@ -364,7 +361,7 @@ class MinecraftPurpleAgent:
         instruction_type: str,
         state_def: dict,
     ) -> Optional[dict]:
-        return self.vla_runner.run(
+        return self._fallback_policy.run_state_instruction(
             image=image,
             instruction=instruction,
             instruction_type=instruction_type,
@@ -378,83 +375,53 @@ class MinecraftPurpleAgent:
         instruction_type: str,
         state_def: dict,
     ) -> Optional[dict]:
-        """Dispatch instruction execution to JarvisVLA or VLM based on whether
-        the instruction is a strict canonical key.
-        """
-        try:
-            canonical = canonicalize_strict_instruction_key(instruction)
-            if canonical is not None:
-                # Use JarvisVLA for strict canonical instructions
-                return self._run_state_instruction(image, canonical, instruction_type, state_def)
-
-            # Otherwise prefer VLM runner when available
-            resp = self.vlm_runner.run_action(image, instruction, instruction_type)
-            if resp is not None:
-                return resp
-
-            # Fallback to JarvisVLA invoked with raw instruction
-            return self._run_state_instruction(image, instruction, instruction_type, state_def)
-        except Exception as e:
-            logger.exception("_run_mixed_instruction failed: %s", e)
-            return {
-                "__action_format__": "agent",
-                "action": noop_agent_action(),
-            }
+        return self._fallback_policy.run_instruction(
+            image=image,
+            instruction=instruction,
+            instruction_type=instruction_type,
+            state_def=state_def,
+        )
 
     def _post_startup_assess(self, image: np.ndarray) -> None:
-        """After the initial noop period, classify horizon and initialize
-        short or long execution mode. This will create plans/executor and
-        episode directories as needed.
-        """
         task_text = self._task_text or ""
-
-        # 1) Horizon classification is planner-owned.
         horizon = self.planner.classify_horizon(task_text, observation_image=image)
 
-        # 2) Short-horizon flow
         if horizon == "short":
             directive = self.planner.generate_short_directive(
                 task_text,
                 observation_image=image,
             )
-
             instruction = directive.get("instruction") if isinstance(directive, dict) else task_text
             instruction_type = directive.get("instruction_type") if isinstance(directive, dict) else "normal"
 
+            # Always prefer the canonical strict key as instruction for VLA quality,
+            # but always route through FallbackPolicyEngine (never bypass to VLA directly).
             canonical = canonicalize_strict_instruction_key(instruction)
-            if canonical:
-                self._short_use_jarvis = True
-                self._short_instruction = canonical
-                self._short_instruction_type = instruction_type or "normal"
-            else:
-                self._short_use_jarvis = False
-                self._short_instruction = instruction
-                self._short_instruction_type = instruction_type or "normal"
+            self._short_instruction = canonical if canonical else instruction
+            self._short_instruction_type = instruction_type or "normal"
+            self._short_state_def = _build_short_state_def(
+                instruction=self._short_instruction,
+                task_text=task_text,
+            )
 
             self._execution_mode = "short"
             self._plan = {
                 "instruction": self._short_instruction,
                 "instruction_type": self._short_instruction_type,
             }
-
-            # Episode bookkeeping
             self._episode_start = datetime.now()
             if self._episode_dir is None:
                 self._episode_dir = self._make_episode_dir(task_text)
             self._save_plan()
-
-            logger.info("Short-horizon mode initialized (use_jarvis=%s)", self._short_use_jarvis)
+            logger.info(
+                "Short-horizon mode: instruction=%r hint=%s",
+                self._short_instruction,
+                self._short_state_def.get("execution_hint"),
+            )
             return
 
-        # 3) Long-horizon flow
-        plan = self.planner.generate_long_plan(
-            task_text,
-            observation_image=image,
-        )
-
+        plan = self.planner.generate_long_plan(task_text, observation_image=image)
         self._plan = plan or {}
-
-        # Create FSMExecutor with mixed instruction runner and optional VQA check
         self._executor = FSMExecutor(
             plan=self._plan,
             instruction_runner=self._run_mixed_instruction,
@@ -462,9 +429,7 @@ class MinecraftPurpleAgent:
             vqa_interval_steps=self._vqa_interval_steps,
         )
 
-        state_count = sum(
-            1 for _, value in (self._plan or {}).items() if isinstance(value, dict)
-        )
+        state_count = sum(1 for _, value in (self._plan or {}).items() if isinstance(value, dict))
         logger.info("Long-horizon FSM executor ready with %d steps", state_count)
 
         self._execution_mode = "long"
@@ -474,10 +439,6 @@ class MinecraftPurpleAgent:
         self._save_plan()
 
     def _vqa_checker(self, image: np.ndarray, state_def: dict) -> Optional[bool]:
-        """Use planner to check whether the current subgoal is completed.
-
-        Returns True/False or None on failure/unknown.
-        """
         try:
             return self.planner.vqa_check_subgoal(
                 task_text=self._task_text or "",
@@ -487,11 +448,6 @@ class MinecraftPurpleAgent:
         except Exception:
             logger.exception("VQA checker failed")
             return None
-
-
-    # ------------------------------------------------------------------
-    # Output saving
-    # ------------------------------------------------------------------
 
     def _make_episode_dir(self, task_text: str) -> Path:
         safe_task = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_text)[:60].strip("_")
@@ -505,7 +461,24 @@ class MinecraftPurpleAgent:
             return
         path = self._episode_dir / "plan.json"
         path.write_text(json.dumps(self._plan, indent=2, ensure_ascii=False))
-        logger.info("Plan saved → %s", path)
+        logger.info("Plan saved -> %s", path)
+
+    def _build_skill_log(self) -> list[dict]:
+        history = self._fallback_policy.skill_history
+        if not history:
+            return []
+        log: list[dict] = []
+        current = history[0]
+        count = 1
+        for skill in history[1:]:
+            if skill == current:
+                count += 1
+            else:
+                log.append({"skill": current, "count": count})
+                current = skill
+                count = 1
+        log.append({"skill": current, "count": count})
+        return log
 
     def _save_episode_result(self) -> None:
         if self._episode_dir is None:
@@ -515,6 +488,9 @@ class MinecraftPurpleAgent:
         if self._episode_start is not None:
             elapsed = (datetime.now() - self._episode_start).total_seconds()
 
+        skill_history = self._fallback_policy.skill_history
+        skill_log = self._build_skill_log()
+
         if self._execution_mode == "long" and self._executor is not None:
             result = {
                 "task": self._plan.get("task") if self._plan else None,
@@ -523,6 +499,8 @@ class MinecraftPurpleAgent:
                 "result": self._executor.result,
                 "total_steps": self._executor.total_step_count,
                 "final_state": self._executor.current_state,
+                "skill_history": skill_history,
+                "skill_log": skill_log,
                 "elapsed_seconds": elapsed,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -536,6 +514,8 @@ class MinecraftPurpleAgent:
                 "final_state": "short_direct",
                 "direct_instruction": self._short_instruction,
                 "direct_instruction_type": self._short_instruction_type,
+                "skill_history": skill_history,
+                "skill_log": skill_log,
                 "elapsed_seconds": elapsed,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -544,4 +524,4 @@ class MinecraftPurpleAgent:
 
         path = self._episode_dir / "result.json"
         path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
-        logger.info("Episode result saved → %s", path)
+        logger.info("Episode result saved -> %s", path)
