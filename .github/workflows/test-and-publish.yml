@@ -70,7 +70,7 @@ jobs:
 
       - name: Smoke check image import path
         run: |
-          docker run --rm --entrypoint uv agentbeats-jarvisvla:ci run python -m py_compile src/server/app.py src/agent/agent.py src/planner/llm_planner.py
+          docker run --rm --entrypoint uv agentbeats-jarvisvla:ci run python -m py_compile src/server/app.py src/agent/agent.py src/planner/planner.py
 
       - name: Extract metadata for Docker
         id: meta
