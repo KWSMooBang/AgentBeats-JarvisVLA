@@ -196,7 +196,6 @@ IMPORTANT NOTES:
   step2: "craft TARGET_ITEM using available materials in inventory"
   step3: "take the crafted item and close the GUI"
 - Use instruction_type="recipe" for craft_item:* keys.
-- If no strict key fits, use descriptive free-form instruction (VLM skill executor will handle GUI).
 - Prefer execution_hint="hybrid" or execution_hint="scripted" for GUI-heavy
   subtasks because deterministic slot-clicking and hotbar cycling are usually
   more reliable than pure VLA.
