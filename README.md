@@ -6,28 +6,31 @@ This document explains the architecture and usage of the JarvisVLA-based Purple 
 
 This Purple Agent follows the pipeline below.
 
-1. The Planner receives task_text and routes it to short or long horizon mode.
+1. The Planner receives task_text and classifies it as short or long horizon.
 2. In short mode, a single instruction is executed directly. In long mode, an FSM plan is generated and executed state by state.
-3. Each state instruction is executed by the JarvisVLA Runner to produce a one-step action.
-4. The final action is returned in the Purple Agent compact format (buttons, camera).
+3. Each instruction is dispatched through the FallbackPolicyEngine, which routes it to either a scripted sequence or JarvisVLA.
+4. Scripted sequences are hybrid: VLA handles navigation and item selection, deterministic primitives handle the core action (place, sweep, etc.).
+5. The final action is returned in the Purple Agent compact format (buttons, camera).
 
 Core constraints:
 
-- VLA-only execution path (no primitive policy path)
-- instruction must be a strict instructions.json key (prefix:item)
-- transitions are timeout/always based (no visual-state-check transitions)
+- Scripted sequences take routing priority over VLA when a keyword match exists.
+- Transitions in the FSM are timeout-only (no visual-state-check transitions).
 - A GPU with at least 24GB VRAM is required for JarvisVLA inference.
 
 ## 2. Source Structure (src)
 
 - src/server/app.py: A2A server entrypoint, CLI parsing, AgentCard registration
 - src/server/executor.py: handles A2A messages (init, obs) and returns actions
-- src/agent/agent.py: orchestrates Planner + FSMExecutor + JarvisVLA Runner
-- src/agent/instruction_runner.py: JarvisVLA one-step instruction runner wrapper
+- src/agent/agent.py: orchestrates Planner + FSMExecutor + FallbackPolicyEngine
+- src/agent/fallback_policy.py: routes instructions to scripted sequences or VLA; defines sequence templates and scripted primitives
+- src/agent/sequence_router.py: keyword-based routing from instruction text to sequence name
+- src/agent/vla_runner.py: JarvisVLA one-step instruction runner wrapper
 - src/executor/fsm_executor.py: timeout-only FSM executor
-- src/planner/llm_planner.py: horizon classification, short directive generation, long plan generation
+- src/planner/planner.py: horizon classification, short directive generation, long plan generation
+- src/planner/prompt_template.py: LLM prompt templates for planner
 - src/planner/validator.py: plan/instruction validation
-- src/planner/instruction_registry.py: instruction key normalization/validation against instructions.json
+- src/planner/instruction_registry.py: instruction key normalization/validation
 - src/protocol/models.py: A2A payload schema (Pydantic)
 - src/action/converter.py: noop and action-format utilities
 
@@ -36,8 +39,7 @@ Core constraints:
 ### 3.1 A2A Layer
 
 - On init:
-  - reset agent
-  - initialize per-context state
+  - reset agent with task_text
   - return ack
 - On obs:
   - decode base64 image
@@ -46,36 +48,61 @@ Core constraints:
 
 ### 3.2 Agent Layer
 
-- reset(task_text):
-  - routes with Planner (short or long)
-  - short:
-    - stores single instruction and instruction_type, then enters direct execution mode
-  - long:
-    - generates/validates/re-generates plan if needed
-    - creates FSMExecutor
-  - creates episode directory and saves plan.json
+reset(task_text):
 
-- act(obs, state):
-  - short: executes the same instruction with JarvisVLA every step
-  - long: executes current FSM-state instruction and evaluates timeout transitions
-  - on termination, returns noop and saves result.json
+- 5 startup noop frames to let the environment settle
+- _post_startup_assess() classifies horizon and initializes execution
+  - short: generates single instruction + instruction_type, enters direct execution mode
+  - long: generates FSM plan, creates FSMExecutor
+- creates episode directory and saves plan.json
 
-### 3.3 Planner/Plan Rules
+act(obs, state):
 
-- short horizon:
-  - JSON format: {instruction, instruction_type}
-  - instruction must be a strict key (prefix:item)
-- long horizon:
-  - generates step-based plan and converts it to canonical FSM
-  - ensures fallback state exists
-  - ensures non-fallback states have timeout transitions
-  - transition conditions are limited to always or timeout
+- short: runs the same instruction through FallbackPolicyEngine every step
+- long: FSMExecutor advances through FSM states, each step runs through FallbackPolicyEngine
+- on termination, returns noop and saves result.json
 
-### 3.4 JarvisVLA Runner
+### 3.3 Planner
+
+- Horizon classification via LLM (HORIZON_SYSTEM_PROMPT)
+  - SHORT: single instruction family (kill, mine, craft, pickup, use, drop)
+  - LONG: multi-step sequential tasks (mine → smelt → craft chains)
+- Short horizon: returns {instruction, instruction_type}; instruction is a canonical prefix:item key
+- Long horizon: generates step-based FSM plan; ensures fallback state and timeout transitions
+- Transitions are limited to always or timeout conditions
+
+### 3.4 FallbackPolicyEngine
+
+Routing order in make_policy_spec():
+
+1. task_text keyword match (overrides planner intent — prevents misrouting like "lay carpet" → craft route)
+2. instruction keyword match via SequenceRouter
+3. planner execution_hint fallback (vla / scripted / hybrid)
+
+Sequence templates map a sequence name to an ordered list of {executor, primitive/instruction, steps}. VLA steps handle navigation and item selection; script steps execute deterministic motor actions. Key sequences:
+
+- open_inventory_craft: open inventory → VLA crafts item in recipe mode
+- line_place_repeat: open inventory → VLA crafts carpet from wool → VLA selects carpet → place in line
+- scatter_ground_placeables: VLA selects flower → scatter on ground while walking
+- place_light_sources: VLA selects torch → place while walking
+- approach_then_vertical_place: VLA faces wall → VLA selects item → place on wall face
+- clear_ground_plants: VLA selects tool → sweep attack across ground
+- approach_farmland_then_plant_rows: VLA moves to farmland → cycle hotbar → plant rows
+
+### 3.5 SequenceRouter
+
+Keyword-based routing with underscore normalization:
+
+- task_texts from the benchmark arrive with underscores (e.g. "lay_carpet", "light_up_the_surroundings")
+- underscores are normalized to spaces before keyword matching so space-based keywords match correctly
+
+### 3.6 JarvisVLA Runner
 
 - uses jarvisvla.evaluate.agent_wrapper.VLLM_AGENT
-- executes one state instruction to produce one-step action
-- supports optional 21-bin to 11-bin camera conversion (enabled by default)
+- executes one instruction per step using image history + instruction text
+- instruction_type: normal (natural language) or recipe (crafting GUI mode)
+- supports 21-bin to 11-bin camera conversion (enabled by default)
+- VLA handles negation instructions poorly; use positive descriptions for item selection
 
 ## 4. Server Run Guide
 
@@ -122,7 +149,7 @@ VLA:
 ```json
 {
   "type": "init",
-  "text": "kill_entity:enderman"
+  "text": "lay_carpet"
 }
 ```
 
@@ -164,7 +191,7 @@ Even in failure cases (before init, decode failure, etc.), the server safely ret
 The following files are saved per episode.
 
 - plan.json: planner output plan
-- result.json: execution summary
+- result.json: execution summary including skill_log (sequence of sequences used)
 
 Main fields in result.json:
 
@@ -172,47 +199,28 @@ Main fields in result.json:
 - finished: FSM termination flag (long mode)
 - result: termination reason or current status
 - total_steps: accumulated steps
-- final_state: last state
+- final_state: last FSM state
 
-## 7. Standalone Benchmark Run
+## 7. Troubleshooting
 
-To run directly in the MineStudio loop:
-
-```bash
-cd /workspace/woosung/AgentBeats-JarvisVLA
-
-python examples/run_standalone.py \
-  --category combat \
-  --tasks-dir ./tasks \
-  --output-dir ./outputs \
-  --planner-model gpt-4o \
-  --vla-checkpoint-path /ABS/PATH/TO/JarvisVLA-Checkpoint \
-  --vla-url http://localhost:9020/v1
-```
-
-If you prefer shell-script execution, see scripts/run_benchmark.sh.
-
-## 8. Troubleshooting
-
-- On startup, --vla-checkpoint-path is required:
-  - A required argument is missing. Set a valid checkpoint directory.
-
-- instruction ... is not a valid instructions.json key:
-  - The instruction is not a strict prefix:item key.
-  - Tighten planner prompts/task text or verify the instruction registry.
+- --vla-checkpoint-path is required on startup.
 
 - action keeps returning noop:
   - obs was sent before init, or
   - base64 image decoding failed, or
   - JarvisVLA execution raised an exception.
 
-## 9. Operational Recommendations
+- task routes to wrong sequence:
+  - Check SequenceRouter._keyword_match keyword order.
+  - task_text routing overrides planner intent; verify task_text keywords match intended sequence.
 
-- For short-horizon tasks, prefer single-instruction direct execution.
-- Reserve deep long-horizon decomposition for tasks such as ender_dragon and mine_diamond_from_scratch.
-- Keep planner temperature low (for example, 0.1 to 0.2) to reduce plan variance.
+## 8. Operational Recommendations
 
-## 10. References
+- Keep planner temperature low (0.1 to 0.2) to reduce plan variance.
+- Do not use negation in VLA item selection instructions ("NOT a flower pot"). Use positive descriptions only.
+- Reserve long-horizon mode for tasks with genuine multi-step dependencies.
+
+## 9. References
 
 - JarvisVLA (original repository): https://github.com/CraftJarvis/JarvisVLA
 - MineStudio (framework repository): https://github.com/CraftJarvis/MineStudio
