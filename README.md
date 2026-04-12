@@ -1,4 +1,4 @@
-# JarvisVLA-based Purple Agent README
+# JarvisVLA Purple Agent with Scripted Fallback README
 
 This document explains the architecture and usage of the JarvisVLA-based Purple Agent implemented under src.
 
