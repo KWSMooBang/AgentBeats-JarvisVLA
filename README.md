@@ -75,25 +75,17 @@ act(obs, state):
 
 Routing order in make_policy_spec():
 
-1. task_text keyword match (overrides planner intent — prevents misrouting like "lay carpet" → craft route)
+1. task_text keyword match 
 2. instruction keyword match via SequenceRouter
 3. planner execution_hint fallback (vla / scripted / hybrid)
 
-Sequence templates map a sequence name to an ordered list of {executor, primitive/instruction, steps}. VLA steps handle navigation and item selection; script steps execute deterministic motor actions. Key sequences:
-
-- open_inventory_craft: open inventory → VLA crafts item in recipe mode
-- line_place_repeat: open inventory → VLA crafts carpet from wool → VLA selects carpet → place in line
-- scatter_ground_placeables: VLA selects flower → scatter on ground while walking
-- place_light_sources: VLA selects torch → place while walking
-- approach_then_vertical_place: VLA faces wall → VLA selects item → place on wall face
-- clear_ground_plants: VLA selects tool → sweep attack across ground
-- approach_farmland_then_plant_rows: VLA moves to farmland → cycle hotbar → plant rows
+Sequence templates map a sequence name to an ordered list of {executor, primitive/instruction, steps}. VLA steps handle navigation and item selection; script steps execute deterministic motor actions. 
 
 ### 3.5 SequenceRouter
 
 Keyword-based routing with underscore normalization:
 
-- task_texts from the benchmark arrive with underscores (e.g. "lay_carpet", "light_up_the_surroundings")
+- task_texts from the benchmark arrive with underscores 
 - underscores are normalized to spaces before keyword matching so space-based keywords match correctly
 
 ### 3.6 JarvisVLA Runner
