@@ -1,13 +1,4 @@
-"""
-Scripted Policy Agent
-
-Core agent class that orchestrates:
-  1. LLM Planner  -> FSM JSON from task_text
-  2. FSM Executor -> step-by-step action generation from images
-  3. JarvisVLA / fallback policy execution
-
-The agent receives ONLY task_text + observation image.
-"""
+"""Minecraft purple-agent: planner → FSM executor → JarvisVLA / scripted fallback."""
 
 from __future__ import annotations
 
@@ -23,7 +14,7 @@ import numpy as np
 
 from src.action.converter import ActionConverter, noop_agent_action
 from src.agent.fallback_policy import FallbackPolicyEngine
-from src.agent.vlm_sequence_selector import VLMSequenceSelector
+from src.agent.sequence_router import SequenceRouter
 from src.executor.fsm_executor import FSMExecutor
 from src.planner.instruction_registry import canonicalize_strict_instruction_key
 from src.planner.planner import Planner
@@ -32,42 +23,26 @@ from src.planner.validator import PlanValidator
 logger = logging.getLogger(__name__)
 
 
-# Instruction-prefix → (execution_hint, sequence_name) mapping.
-#
-# Rules:
-# - sequence_name is set ONLY when the mapping is unambiguous (one mechanic).
-#   e.g. "drop:*" always means drop-cycle; no VLM needed.
-# - When the prefix covers multiple possible mechanics (use_item covers
-#   drinking, shooting, throwing, entity-use, defending…), set only
-#   execution_hint and let VLMSequenceSelector pick the specific sequence
-#   from the catalog using the observation image.
-# - "vla" hint means no scripted path: VLA handles it end-to-end.
+# Maps instruction prefix to (execution_hint, sequence_name).
+# Empty sequence_name means SequenceRouter picks from catalog.
 _PREFIX_SEQUENCE_MAP: dict[str, tuple[str, str]] = {
-    "drop":        ("scripted", "drop_cycle"),   # always drop: unambiguous
-    "use_item":    ("hybrid",   ""),             # many subtypes → let VLM pick
-    "kill_entity": ("hybrid",   ""),             # melee or ranged → VLM picks
-    "mine_block":  ("hybrid",   ""),             # mine or dig → VLM picks
-    "craft_item":  ("vla",      ""),             # VLA handles crafting table UI
-    "pickup":      ("vla",      ""),             # VLA navigates to item
+    "drop":        ("scripted", "drop_cycle"),
+    "use_item":    ("hybrid",   ""),
+    "kill_entity": ("vla",      ""),
+    "mine_block":  ("vla",      ""),
+    "craft_item":  ("hybrid",   "open_inventory_craft"),
+    "pickup":      ("vla",      ""),
 }
 
 
 def _build_short_state_def(instruction: str, task_text: str) -> dict:
-    """Build a state_def hint for FallbackPolicyEngine from a short-horizon instruction.
-
-    Uses the strict-key prefix (before ':') to suggest an execution_hint and
-    optionally a sequence_name.  When sequence_name is omitted, VLMSequenceSelector
-    uses the observation image + catalog to pick the right sequence.
-
-    This is NOT benchmark leaking — the mapping is based on Minecraft
-    game-mechanic categories (drop, use, kill, mine, craft, pickup), not on
-    task-specific knowledge.
-    """
+    """Build a state_def hint from a short-horizon instruction prefix."""
     prefix = instruction.split(":")[0].lower().strip() if ":" in instruction else ""
     hint, seq = _PREFIX_SEQUENCE_MAP.get(prefix, ("vla", ""))
     state_def: dict = {
         "description": f"short_direct:{instruction}",
         "execution_hint": hint,
+        "task_text": task_text,
     }
     if seq:
         state_def["sequence_name"] = seq
@@ -113,11 +88,10 @@ class MinecraftPurpleAgent:
         self.planner = Planner(**planner_cfg)
         self.validator = PlanValidator()
         self.vla_runner = self._build_vla_runner(vla_cfg)
-        self.vlm_runner = self._build_vlm_runner(vlm_cfg)
         self._vqa_interval_steps = int(vlm_cfg.get("vqa_interval_steps", 600))
 
         self._action_converter = ActionConverter()
-        self._sequence_selector = self._build_sequence_selector(vlm_cfg)
+        self._sequence_selector = self._build_sequence_selector()
         self._fallback_policy = FallbackPolicyEngine(
             action_converter=self._action_converter,
             vla_runner=self.vla_runner,
@@ -322,51 +296,8 @@ class MinecraftPurpleAgent:
             logger.exception("Failed to initialize VLA runner: %s", e)
             raise RuntimeError("Failed to initialize VLA runner") from e
 
-    def _build_vlm_runner(self, vlm_cfg: dict):
-        try:
-            from src.agent.vlm_runner import VLMRunner
-
-            runner = VLMRunner(
-                api_key=vlm_cfg.get("api_key", "EMPTY"),
-                base_url=vlm_cfg.get("base_url", "https://api.openai.com/v1"),
-                model=vlm_cfg.get("model", "gpt-4o-mini"),
-                temperature=vlm_cfg.get("temperature", 0.2),
-            )
-            logger.info("VLM runner is initialized (legacy, unused in main path)")
-            return runner
-        except Exception as e:
-            logger.warning("VLM runner init failed (non-fatal): %s", e)
-            return None
-
-    def _build_sequence_selector(self, vlm_cfg: dict):
-        if not vlm_cfg:
-            return None
-        try:
-            runner = VLMSequenceSelector(
-                api_key=vlm_cfg.get("api_key", "EMPTY"),
-                base_url=vlm_cfg.get("base_url", "https://api.openai.com/v1"),
-                model=vlm_cfg.get("model", "gpt-4o-mini"),
-                temperature=vlm_cfg.get("temperature", 0.2),
-            )
-            logger.info("VLMSequenceSelector initialized")
-            return runner
-        except Exception as e:
-            logger.warning("VLMSequenceSelector init failed (non-fatal): %s", e)
-            return None
-
-    def _run_state_instruction(
-        self,
-        image: np.ndarray,
-        instruction: str,
-        instruction_type: str,
-        state_def: dict,
-    ) -> Optional[dict]:
-        return self._fallback_policy.run_state_instruction(
-            image=image,
-            instruction=instruction,
-            instruction_type=instruction_type,
-            state_def=state_def,
-        )
+    def _build_sequence_selector(self):
+        return SequenceRouter()
 
     def _run_mixed_instruction(
         self,
@@ -394,8 +325,6 @@ class MinecraftPurpleAgent:
             instruction = directive.get("instruction") if isinstance(directive, dict) else task_text
             instruction_type = directive.get("instruction_type") if isinstance(directive, dict) else "normal"
 
-            # Always prefer the canonical strict key as instruction for VLA quality,
-            # but always route through FallbackPolicyEngine (never bypass to VLA directly).
             canonical = canonicalize_strict_instruction_key(instruction)
             self._short_instruction = canonical if canonical else instruction
             self._short_instruction_type = instruction_type or "normal"

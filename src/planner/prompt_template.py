@@ -186,6 +186,8 @@ IMPORTANT NOTES:
 - Use kill_entity:MOB_NAME as the instruction (strict canonical key).
 - These are almost always single-step: one kill_entity:* instruction repeated for the full budget.
 - Keep as SHORT horizon unless there are multiple distinct mob types to fight sequentially.
+- ALWAYS use execution_hint="vla" for kill_entity:* states. VLA handles approach, targeting, and attack end-to-end.
+- NEVER use execution_hint="scripted" or "hybrid" for combat states — scripted loops cannot aim at enemies.
 
 ### Crafting / GUI Interaction tasks (craft, smelt, enchant, brew)
 - These require GUI interaction (inventory or crafting table or furnace).
@@ -217,9 +219,11 @@ IMPORTANT NOTES:
   step3: "take result item"
 - Prefer execution_hint="scripted" for direct hotbar cycling, repeated use,
   deterministic placing, or GUI clicking.
-- Prefer execution_hint="vla" for open-ended combat, mining, navigation, or
-  visually-reactive approach behavior.
-- Prefer execution_hint="hybrid" when the subgoal has both.
+- Prefer execution_hint="vla" ONLY for tasks requiring open-ended navigation, combat, or
+  mining where visual judgment about movement direction is essential.
+- Prefer execution_hint="hybrid" when placing or using items on a surface (ground, wall,
+  floor) — the visual sequence selector needs to be invoked to pick the right placement pattern.
+- Prefer execution_hint="hybrid" when subgoal has both an approach phase and a scripted phase.
 
 ## Output Format (Simplified, TIMEOUT-ONLY)
 
@@ -249,7 +253,7 @@ IMPORTANT NOTES:
   "fallback": {
     "instruction": "<RAW task_text string>",
     "instruction_type": "normal",
-    "execution_hint": "hybrid",
+    "execution_hint": "vla",
     "condition": {"type": "always", "next": "fallback"}
   }
 }

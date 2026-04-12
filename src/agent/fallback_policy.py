@@ -7,7 +7,7 @@ import numpy as np
 
 from src.action.converter import ActionConverter, noop_agent_action
 from src.planner.instruction_registry import canonicalize_strict_instruction_key
-from src.agent.vlm_sequence_selector import VLMSequenceSelector
+from src.agent.sequence_router import SequenceRouter
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class FallbackPolicyEngine:
         self,
         action_converter: ActionConverter,
         vla_runner: Any,
-        sequence_selector: Optional[VLMSequenceSelector] = None,
+        sequence_selector: Optional[SequenceRouter] = None,
     ) -> None:
         self._action_converter = action_converter
         self._vla_runner = vla_runner
@@ -28,10 +28,6 @@ class FallbackPolicyEngine:
 
     @property
     def skill_history(self) -> list[str]:
-        return self._selection_history
-
-    @property
-    def selection_history(self) -> list[str]:
         return self._selection_history
 
     def reset_episode(self) -> None:
@@ -92,6 +88,23 @@ class FallbackPolicyEngine:
                 "selector_reason": "planner_primitives",
             }
         else:
+            # Task-text takes routing priority over planner-generated sequence_name.
+            # The planner's LLM can misinterpret task intent (e.g. "lay carpet" →
+            # "craft_item: carpet"), so we route by the raw task_text first.
+            task_text = state_def.get("task_text", "")
+            if task_text:
+                task_text_sel = self._select_sequence(task_text, {}, require_sequence=False)
+                if task_text_sel.get("sequence_name"):
+                    sequence_name = task_text_sel["sequence_name"]
+                    execution_hint = (
+                        self.normalize_execution_hint(task_text_sel.get("execution_hint"))
+                        or execution_hint
+                    )
+                    logger.debug(
+                        "[PolicySpec] task_text routing overrides planner: seq=%s reason=%s",
+                        sequence_name, task_text_sel.get("reason"),
+                    )
+
             require_sequence = (
                 execution_hint in {"scripted", "hybrid"}
                 and not sequence_name
@@ -105,7 +118,6 @@ class FallbackPolicyEngine:
                 }
             else:
                 selection = self._select_sequence(
-                    image,
                     instruction,
                     state_def,
                     require_sequence=require_sequence,
@@ -234,19 +246,23 @@ class FallbackPolicyEngine:
                 {"executor": "script", "primitive": "look_down_use", "steps": 70},
             ],
             "line_place_repeat": [
-                {"executor": "script", "primitive": "cycle_hotbar", "steps": 18},
+                {"executor": "vla", "instruction": "select the carpet or placeable floor item in your hotbar", "instruction_type": "normal", "steps": 15},
                 {"executor": "script", "primitive": "place_row_walk", "steps": 120},
             ],
             "stack_place_repeat": [
                 {"executor": "script", "primitive": "stack_vertical", "steps": 100},
             ],
             "scatter_ground_placeables": [
-                {"executor": "script", "primitive": "cycle_hotbar", "steps": 24},
+                {"executor": "vla", "instruction": "select a natural flower (like dandelion, poppy, or tulip), NOT a flower pot or container, from your hotbar", "instruction_type": "normal", "steps": 20},
+                {"executor": "script", "primitive": "look_down_use_walk", "steps": 120},
+            ],
+            "place_light_sources": [
+                {"executor": "vla", "instruction": "select a torch or light-emitting block from your hotbar", "instruction_type": "normal", "steps": 20},
                 {"executor": "script", "primitive": "look_down_use_walk", "steps": 120},
             ],
             "approach_then_vertical_place": [
-                {"executor": "vla", "instruction": "face a nearby vertical surface", "instruction_type": "normal", "steps": 30},
-                {"executor": "script", "primitive": "cycle_hotbar", "steps": 24},
+                {"executor": "vla", "instruction": "face a nearby wall or vertical surface and move close to it", "instruction_type": "normal", "steps": 30},
+                {"executor": "vla", "instruction": "select an item frame, painting, or wall decoration from your hotbar", "instruction_type": "normal", "steps": 20},
                 {"executor": "script", "primitive": "place_wall_use", "steps": 90},
             ],
             "aim_then_use_repeat": [
@@ -265,6 +281,13 @@ class FallbackPolicyEngine:
             ],
             "consume_cycle": [
                 {"executor": "script", "primitive": "cycle_hotbar_then_hold_use", "steps": 120},
+            ],
+            "consume_item_sequence": [
+                {"executor": "script", "primitive": "cycle_hotbar_then_hold_use", "steps": 120},
+            ],
+            "open_inventory_craft": [
+                {"executor": "script", "primitive": "open_inventory", "steps": 6},
+                {"executor": "vla", "instruction_type": "recipe", "steps": 110},
             ],
             "throw_cycle": [
                 {"executor": "script", "primitive": "throw_held_item_flow", "steps": 80},
@@ -320,7 +343,7 @@ class FallbackPolicyEngine:
                 {"executor": "script", "primitive": "shear_target", "steps": 70},
             ],
             "clear_ground_plants": [
-                {"executor": "script", "primitive": "cycle_hotbar", "steps": 18},
+                {"executor": "vla", "instruction": "select a cutting tool such as shears or a sword from your hotbar", "instruction_type": "normal", "steps": 20},
                 {"executor": "script", "primitive": "attack_walk_sweep", "steps": 120},
             ],
         }
@@ -593,12 +616,18 @@ class FallbackPolicyEngine:
         if script_key == "line_place_repeat":
             return FallbackPolicyEngine.semantic_script("place_light_source_along_path", step)
         if script_key == "attack_walk_sweep":
-            # Walk forward and attack at eye level — for clearing plants/tall_grass.
-            # No camera pitch needed; tall_grass is at player level.
-            cycle = step % 8
-            if cycle < 5:
-                return {"forward": 1, "attack": 1}
-            return {"forward": 1, "camera": [0.0, 5.0]}
+            if step < 5:
+                return {"camera": [-5.0, 0.0]}
+            c = (step - 5) % 25
+            if c < 3:   return {"attack": 1}
+            if c < 5:   return {"forward": 1}
+            if c < 8:   return {"attack": 1}
+            if c < 10:  return {"camera": [0.0, 25.0]}
+            if c < 12:  return {"forward": 1}
+            if c < 15:  return {"attack": 1}
+            if c < 17:  return {"camera": [0.0, -30.0]}
+            if c < 19:  return {"forward": 1}
+            return {"attack": 1}
         if script_key == "melee_attack":
             cycle = step % 20
             if cycle < 5:
@@ -718,6 +747,7 @@ class FallbackPolicyEngine:
             slot = (local_step // 6) % 9 + 1
             if local_step % 6 == 0:
                 return self.env_to_agent_action({f"hotbar.{slot}": 1})
+            return self.env_to_agent_action({})
         if primitive_name == "hold_use":
             return self.env_to_agent_action({"use": 1})
         if primitive_name == "tap_use":
@@ -735,12 +765,14 @@ class FallbackPolicyEngine:
                 return self.env_to_agent_action({"use": 1})
             return self.env_to_agent_action({})
         if primitive_name == "look_down_use_walk":
-            cycle = local_step % 12
+            cycle = local_step % 15
             if cycle < 3:
-                return self.env_to_agent_action({"camera": [9.0, 0.0]})
+                return self.env_to_agent_action({"camera": [5.0, 0.0]})
             if cycle < 6:
                 return self.env_to_agent_action({"use": 1})
-            return self.env_to_agent_action({"forward": 1, "sprint": 1})
+            if cycle < 10:
+                return self.env_to_agent_action({"forward": 1, "camera": [0.0, 20.0]})
+            return self.env_to_agent_action({"use": 1})
         if primitive_name == "plant_row":
             cycle = local_step % 16
             slot = (local_step // 16) % 4 + 1
@@ -755,6 +787,12 @@ class FallbackPolicyEngine:
             cycle = local_step % 12
             if cycle < 4:
                 return self.env_to_agent_action({"attack": 1})
+            return self.env_to_agent_action({})
+        if primitive_name == "open_inventory":
+            if local_step == 0:
+                return self.env_to_agent_action({"inventory": 1})
+            if local_step < 3:
+                return self.env_to_agent_action({"inventory": 0})
             return self.env_to_agent_action({})
         if primitive_name == "cycle_hotbar_then_hold_use":
             cycle = local_step % 40
@@ -772,12 +810,17 @@ class FallbackPolicyEngine:
                 return self.env_to_agent_action({"forward": 1, "sneak": 1})
             return self.env_to_agent_action({"camera": [0.0, 8.0]})
         if primitive_name == "place_wall_use":
-            cycle = local_step % 10
-            if cycle < 3:
-                return self.env_to_agent_action({"camera": [0.0, 6.0]})
-            if cycle < 6:
+            # Approach wall, then place on face: 4 steps approach → use burst → rotate to next spot
+            if local_step < 4:
+                return self.env_to_agent_action({"forward": 1, "sneak": 1})
+            cycle = (local_step - 4) % 16
+            if cycle < 5:
                 return self.env_to_agent_action({"use": 1})
-            return self.env_to_agent_action({})
+            if cycle < 7:
+                return self.env_to_agent_action({})
+            if cycle < 11:
+                return self.env_to_agent_action({"camera": [0.0, 20.0]})
+            return self.env_to_agent_action({"camera": [0.0, -15.0]})
         if primitive_name == "dig_down_attack":
             cycle = local_step % 12
             if cycle < 4:
@@ -869,79 +912,17 @@ class FallbackPolicyEngine:
 
     def _select_sequence(
         self,
-        image: np.ndarray,
         instruction: str,
         state_def: dict[str, Any],
         require_sequence: bool = False,
     ) -> dict[str, Any]:
-        if self._sequence_selector is None:
-            return {
-                "execution_hint": self.normalize_execution_hint(state_def.get("execution_hint")) or "vla",
-                "sequence_name": None,
-                "reason": "selector_unavailable",
-            }
-        return self._sequence_selector.select_sequence(
-            image=image,
+        selector = self._sequence_selector or SequenceRouter()
+        return selector.select_sequence(
             instruction=instruction,
             state_def=state_def,
             sequence_catalog=self.sequence_catalog(),
-            primitive_catalog=self.primitive_catalog(),
             require_sequence=require_sequence,
         )
-
-    @staticmethod
-    def primitive_catalog() -> dict[str, str]:
-        return {
-            # --- view / camera ---
-            "look_up": "Tilt camera strongly upward to face the sky.",
-            "maintain_up_view": "Hold camera at an upward angle while slowly oscillating yaw.",
-            "look_down": "Tilt camera down toward the ground.",
-            "look_down_use": "Aim down and use repeatedly.",
-            "look_down_and_use": "Aim down and repeatedly use/place toward the ground.",
-            "look_down_use_walk": "Aim down, place/use, then move forward.",
-            "look_forward": "Return camera to a forward-facing neutral position.",
-            "scan_rotate": "Rotate camera yaw left-right to scan the surroundings.",
-            # --- hotbar / inventory ---
-            "cycle_hotbar": "Cycle across hotbar slots to find a usable item.",
-            "cycle_hotbar_then_hold_use": "Search hotbar slots and hold use on each.",
-            "gui_click_confirm_repeat": "Repeat simple click/confirm interactions in an open UI.",
-            # --- movement ---
-            "sprint_forward": "Sprint forward for rapid navigation or repositioning.",
-            "climb_forward": "Move and jump to climb a structure or slope.",
-            "stack_vertical": "Jump-place upward to build a pillar.",
-            # --- use / interact ---
-            "hold_use": "Hold the use action repeatedly.",
-            "tap_use": "Tap use a few times without moving.",
-            "hold_use_forward": "Walk forward while holding use.",
-            "approach_and_use_on_entity": "Walk toward the nearest entity and use held item on it (lead, shears, bucket, etc.).",
-            "approach_and_use_rest_object": "Walk to a rest object (bed) and hold use to sleep/rest.",
-            "hold_defensive_item": "Cycle to a defensive item (shield, totem) and hold use to block.",
-            # --- attack / combat ---
-            "attack_walk_sweep": "Walk forward and attack at eye level; for clearing tall grass or plants.",
-            "melee_attack": "Sprint-approach and swing at the nearest entity in a cycle.",
-            "ranged_attack": "Cycle hotbar to a bow/crossbow, aim slightly up, charge and release.",
-            "throw_weapon": "Cycle hotbar and rapidly use a throwable projectile (snowball, trident, ender pearl).",
-            "shear_target": "Approach and use shears/tool on the nearest entity.",
-            # --- mining / gathering ---
-            "mine_forward": "Mine the block directly in front of the player.",
-            "mine_ground": "Look down and break blocks below the player.",
-            "dig_down_attack": "Look down and dig/break below the player.",
-            "chop_tree": "Attack a tree block while approaching; cycle view for upper trunk.",
-            # --- placing / building ---
-            "plant_row": "Place or plant repeatedly while creeping forward.",
-            "place_row_walk": "Place blocks/items in a rough line while moving.",
-            "place_wall_use": "Use/place onto a nearby vertical surface.",
-            "fill_with_block": "Select a block and place it into the hole below.",
-            "portal_frame_place": "Place a structured frame with repeated vertical placements.",
-            "snow_golem_stack": "Stack base blocks then place a trigger item on top.",
-            # --- consume / drop / throw ---
-            "consume_held_item": "Cycle hotbar and hold use to eat/drink the held item.",
-            "throw_held_item_flow": "Cycle held throwable items and use them.",
-            "drop_cycle": "Cycle held items and drop them one by one.",
-            # --- special ---
-            "rod_cast_repeat": "Aim and cast a held rod/tool repeatedly.",
-            "boat_place_use": "Place a vehicle and immediately interact to mount/use it.",
-        }
 
     @staticmethod
     def sequence_catalog() -> dict[str, dict[str, Any]]:
@@ -1042,9 +1023,14 @@ class FallbackPolicyEngine:
                 "primitive_names": ["stack_vertical"],
             },
             "scatter_ground_placeables": {
-                "execution_hint": "scripted",
-                "description": "Scatter placeable items around the ground while moving.",
-                "primitive_names": ["cycle_hotbar", "look_down_use_walk"],
+                "execution_hint": "hybrid",
+                "description": "Select a decorative natural item (flower, plant) then scatter it on the ground while moving.",
+                "primitive_names": ["look_down_use_walk"],
+            },
+            "place_light_sources": {
+                "execution_hint": "hybrid",
+                "description": "Select a torch or light-emitting block then place repeatedly while moving.",
+                "primitive_names": ["look_down_use_walk"],
             },
             "approach_then_vertical_place": {
                 "execution_hint": "hybrid",
@@ -1125,6 +1111,12 @@ class FallbackPolicyEngine:
                 "execution_hint": "scripted",
                 "description": "Cycle hotbar and eat/drink the held consumable item (food, potion).",
                 "primitive_names": ["consume_held_item"],
+            },
+            # --- crafting ---
+            "open_inventory_craft": {
+                "execution_hint": "hybrid",
+                "description": "Open player inventory (E key) then use VLA recipe mode to craft the target item in the crafting GUI.",
+                "primitive_names": ["open_inventory"],
             },
             # --- rest / sleep ---
             "rest_at_object": {
