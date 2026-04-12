@@ -29,11 +29,13 @@ def _make_agent(monkeypatch, tmp_path: Path) -> MinecraftPurpleAgent:
         MinecraftPurpleAgent,
         "_build_vlm_runner",
         lambda self, _vlm_cfg: None,
+        raising=False,
     )
     monkeypatch.setattr(
         MinecraftPurpleAgent,
         "_build_sequence_selector",
-        lambda self, _vlm_cfg: None,
+        lambda self, *args, **kwargs: None,
+        raising=False,
     )
     return MinecraftPurpleAgent(
         planner_cfg={},
