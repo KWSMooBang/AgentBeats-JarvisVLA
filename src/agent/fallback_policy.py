@@ -246,14 +246,16 @@ class FallbackPolicyEngine:
                 {"executor": "script", "primitive": "look_down_use", "steps": 70},
             ],
             "line_place_repeat": [
-                {"executor": "vla", "instruction": "select the carpet or placeable floor item in your hotbar", "instruction_type": "normal", "steps": 15},
-                {"executor": "script", "primitive": "place_row_walk", "steps": 120},
+                {"executor": "script", "primitive": "open_inventory", "steps": 6},
+                {"executor": "vla", "instruction_type": "recipe", "steps": 50},
+                {"executor": "vla", "instruction": "select the carpet in your hotbar", "instruction_type": "normal", "steps": 15},
+                {"executor": "script", "primitive": "place_row_walk", "steps": 80},
             ],
             "stack_place_repeat": [
                 {"executor": "script", "primitive": "stack_vertical", "steps": 100},
             ],
             "scatter_ground_placeables": [
-                {"executor": "vla", "instruction": "select a natural flower (like dandelion, poppy, or tulip), NOT a flower pot or container, from your hotbar", "instruction_type": "normal", "steps": 20},
+                {"executor": "vla", "instruction": "select a small flat flower such as a dandelion, poppy, or tulip from your hotbar", "instruction_type": "normal", "steps": 20},
                 {"executor": "script", "primitive": "look_down_use_walk", "steps": 120},
             ],
             "place_light_sources": [
