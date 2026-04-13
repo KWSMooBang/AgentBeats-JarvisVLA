@@ -22,8 +22,20 @@ class _DummyInstructionRunner:
 def _make_agent(monkeypatch, tmp_path: Path) -> MinecraftPurpleAgent:
     monkeypatch.setattr(
         MinecraftPurpleAgent,
-        "_build_instruction_runner",
+        "_build_vla_runner",
         lambda self, _vla_cfg: _DummyInstructionRunner(),
+    )
+    monkeypatch.setattr(
+        MinecraftPurpleAgent,
+        "_build_vlm_runner",
+        lambda self, _vlm_cfg: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        MinecraftPurpleAgent,
+        "_build_sequence_selector",
+        lambda self, *args, **kwargs: None,
+        raising=False,
     )
     return MinecraftPurpleAgent(
         planner_cfg={},
@@ -36,18 +48,20 @@ def _make_agent(monkeypatch, tmp_path: Path) -> MinecraftPurpleAgent:
 def test_purple_agent_short_mode_smoke(monkeypatch, tmp_path):
     agent = _make_agent(monkeypatch, tmp_path)
 
+    monkeypatch.setattr(agent.planner, "classify_horizon", lambda *args, **kwargs: "short")
     monkeypatch.setattr(
         agent.planner,
-        "plan_task",
-        lambda task_text, feedback=None, force_horizon=None: {
-            "horizon": "short",
+        "generate_short_directive",
+        lambda *args, **kwargs: {
             "instruction": "kill_entity:zombie",
             "instruction_type": "normal",
         },
     )
 
     episode_dir = tmp_path / "short_episode"
+    episode_dir.mkdir(parents=True, exist_ok=True)
     agent.reset(task_text="kill one zombie", episode_dir=str(episode_dir))
+    agent._startup_noop_remaining = 0
     state = agent.initial_state(task_text="kill one zombie")
 
     obs = {"image": np.zeros((8, 8, 3), dtype=np.uint8)}
@@ -62,6 +76,8 @@ def test_purple_agent_short_mode_smoke(monkeypatch, tmp_path):
 
 def test_purple_agent_long_mode_smoke(monkeypatch, tmp_path):
     agent = _make_agent(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(agent.planner, "classify_horizon", lambda *args, **kwargs: "long")
 
     long_plan = {
         "task": "mine one cobblestone",
@@ -83,15 +99,14 @@ def test_purple_agent_long_mode_smoke(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         agent.planner,
-        "plan_task",
-        lambda task_text, feedback=None, force_horizon=None: {
-            "horizon": "long",
-            "plan": long_plan,
-        },
+        "generate_long_plan",
+        lambda *args, **kwargs: long_plan,
     )
 
     episode_dir = tmp_path / "long_episode"
+    episode_dir.mkdir(parents=True, exist_ok=True)
     agent.reset(task_text="mine one cobblestone", episode_dir=str(episode_dir))
+    agent._startup_noop_remaining = 0
     state = agent.initial_state(task_text="mine one cobblestone")
 
     obs = {"image": np.zeros((8, 8, 3), dtype=np.uint8)}

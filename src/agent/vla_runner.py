@@ -17,7 +17,7 @@ from src.action.converter import noop_agent_action
 logger = logging.getLogger(__name__)
 
 
-class JarvisVLAInstructionRunner:
+class VLARunner:
     """Executes one JarvisVLA instruction step and returns an agent action."""
 
     def __init__(

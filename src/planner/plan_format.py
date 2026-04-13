@@ -17,10 +17,11 @@ RESERVED_TOP_LEVEL_KEYS = frozenset({
     "global_config",
     "states",
     "steps",
+    "initial_state",
 })
 
 DEFAULT_GLOBAL_CONFIG = {
-    "max_total_steps": 2400,
+    "max_total_steps": 12000,
     "on_global_timeout": "abort",
 }
 
@@ -102,7 +103,7 @@ def _auto_link_linear_steps(states: dict[str, Any]) -> None:
         # If no timeout transition, add one linking to next step.
         if not has_timeout_trans:
             transitions.append({
-                "condition": {"type": "timeout", "max_steps": 600},
+                "condition": {"type": "timeout", "max_steps": 1200},
                 "next_state": next_step,
             })
 
@@ -122,6 +123,10 @@ def _step_to_state(step_name: str, step_def: dict[str, Any]) -> dict[str, Any]:
 
     if "max_retries" in step_def:
         state["max_retries"] = step_def["max_retries"]
+    if "execution_hint" in step_def:
+        state["execution_hint"] = step_def["execution_hint"]
+    if "primitives" in step_def:
+        state["primitives"] = copy.deepcopy(step_def["primitives"])
 
     transitions = step_def.get("transitions")
     if isinstance(transitions, list) and transitions:
@@ -199,6 +204,10 @@ def canonical_to_simplified_plan(plan: dict[str, Any]) -> dict[str, Any]:
             step["instruction_type"] = state_def["instruction_type"]
         if "max_retries" in state_def:
             step["max_retries"] = state_def["max_retries"]
+        if "execution_hint" in state_def:
+            step["execution_hint"] = state_def["execution_hint"]
+        if "primitives" in state_def:
+            step["primitives"] = copy.deepcopy(state_def["primitives"])
 
         transitions = state_def.get("transitions", [])
         if len(transitions) <= 1:

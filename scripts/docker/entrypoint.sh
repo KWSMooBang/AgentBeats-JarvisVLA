@@ -14,7 +14,8 @@ fi
 
 VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
 VLLM_PORT="${VLLM_PORT:-9020}"
-VLA_MODEL_PATH="${VLA_MODEL_PATH:-./models/JarvisVLA-Qwen2-VL-7B}"
+VLA_CHECKPOINT_PATH="${VLA_CHECKPOINT_PATH:-${VLA_MODEL_PATH:-/models/JarvisVLA-Qwen2-VL-7B}}"
+VLA_MODEL_PATH="${VLA_MODEL_PATH:-${VLA_CHECKPOINT_PATH}}"
 VLA_BASE_URL="${VLA_BASE_URL:-http://127.0.0.1:${VLLM_PORT}/v1}"
 VLLM_SERVED_MODEL_NAME="${VLLM_SERVED_MODEL_NAME:-jarvisvla}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-8192}"
@@ -75,9 +76,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 PLANNER_API_KEY="${PLANNER_API_KEY:-${API_KEY:-EMPTY}}"
-PLANNER_URL="${PLANNER_URL:-${URL:-https://api.tokenfactory.nebius.com/v1/}}"
-PLANNER_MODEL="${PLANNER_MODEL:-${MODEL:-openai/gpt-oss-120b-fast}}"
+PLANNER_URL="${PLANNER_URL:-${URL:-https://api.openai.com/v1}}"
+PLANNER_MODEL="${PLANNER_MODEL:-${MODEL:-gpt-5.4-mini}}"
 PLANNER_TEMPERATURE="${PLANNER_TEMPERATURE:-0.2}"
+
+VLM_API_KEY="${VLM_API_KEY:-${API_KEY:-EMPTY}}"
+VLM_URL="${VLM_URL:-${URL:-https://api.openai.com/v1}}"
+VLM_MODEL="${VLM_MODEL:-${MODEL:-gpt-5.4-mini}}"
+VLM_TEMPERATURE="${VLM_TEMPERATURE:-0.2}"
+VQA_INTERVAL_STEPS="${VQA_INTERVAL_STEPS:-600}"
 
 VLA_API_KEY="${VLA_API_KEY:-EMPTY}"
 VLA_HISTORY_NUM="${VLA_HISTORY_NUM:-4}"
@@ -150,6 +157,11 @@ APP_ARGS=(
   --vla-bpe "${VLA_BPE}"
   --vla-instruction-type "${VLA_INSTRUCTION_TYPE}"
   --vla-temperature "${VLA_TEMPERATURE}"
+  --vlm-api-key "${VLM_API_KEY}"
+  --vlm-url "${VLM_URL}"
+  --vlm-model "${VLM_MODEL}"
+  --vlm-temperature "${VLM_TEMPERATURE}"
+  --vqa-interval-steps "${VQA_INTERVAL_STEPS}"
   --device "${DEVICE}"
 )
 

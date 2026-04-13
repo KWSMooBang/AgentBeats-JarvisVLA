@@ -130,7 +130,8 @@ class ActionConverter:
         """Pure-numpy fallback without minestudio dependency."""
         # Buttons → single index via binary encoding
         bits = np.array([env_action.get(k, 0) for k in BUTTON_KEYS], dtype=np.int32)
-        button_idx = int(np.packbits(np.pad(bits, (0, 24 - len(bits)))[:24], bitorder="little")
+        # Pad to exactly 32 bits so that view(uint32) has a whole element to read.
+        button_idx = int(np.packbits(np.pad(bits, (0, 32 - len(bits)))[:32], bitorder="little")
                          .view(np.uint32)[0]) if bits.any() else 0
         button_idx = min(button_idx, 2303)
 
