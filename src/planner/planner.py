@@ -18,7 +18,7 @@ import io
 import json
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from PIL import Image
@@ -448,10 +448,18 @@ class Planner:
         temperature: float = 0.2,
         max_completion_tokens: int = 4096,
         max_retries: int = 2,
+        client: Optional[Any] = None,
     ):
-        from openai import OpenAI
+        self.client = client
+        if self.client is None:
+            try:
+                from openai import OpenAI
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+                self.client = OpenAI(api_key=api_key, base_url=base_url)
+            except ImportError:
+                logger.warning(
+                    "OpenAI package is not installed; Planner LLM calls will use fallback behavior"
+                )
         self.model = model
         self.temperature = temperature
         self.max_completion_tokens = max_completion_tokens
@@ -707,6 +715,10 @@ class Planner:
         user_prompt: str,
         observation_image: Optional[np.ndarray] = None,
     ) -> str:
+        if self.client is None:
+            logger.warning("Planner client is unavailable; returning empty LLM response")
+            return ""
+
         try:
             user_content: object
             if observation_image is None:
